@@ -1,0 +1,6 @@
+{
+  "method": "item/tool/requestUserInput",
+  "paramKeys": [
+    "questions"
+  ]
+}

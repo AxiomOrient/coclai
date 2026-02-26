@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadListParams",
+  "type": "object",
+  "properties": {
+    "archived": {
+      "description": "Optional archived filter; when set to true, only archived threads are returned. If false or null, only non-archived threads are returned.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "cursor": {
+      "description": "Opaque pagination cursor returned by a previous call.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "description": "Optional page size; defaults to a reasonable server-side value.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "modelProviders": {
+      "description": "Optional provider filter; when set, only sessions recorded under these providers are returned. When present but empty, includes all providers.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "sortKey": {
+      "description": "Optional sort key; defaults to created_at.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadSortKey"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "ThreadSortKey": {
+      "type": "string",
+      "enum": [
+        "created_at",
+        "updated_at"
+      ]
+    }
+  }
+}

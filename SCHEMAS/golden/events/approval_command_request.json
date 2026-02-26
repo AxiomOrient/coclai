@@ -1,0 +1,10 @@
+{
+  "method": "item/commandExecution/requestApproval",
+  "paramKeys": [
+    "command",
+    "cwd",
+    "itemId",
+    "threadId",
+    "turnId"
+  ]
+}

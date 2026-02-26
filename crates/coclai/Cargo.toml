@@ -1,0 +1,12 @@
+[package]
+name = "coclai"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+coclai_runtime = { path = "../coclai_runtime" }
+thiserror = "2"
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

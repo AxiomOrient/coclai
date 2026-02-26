@@ -1,0 +1,100 @@
+{
+  "generatedAtUnixMillis": 1772100466169,
+  "iterations": 150000,
+  "warmup": 20000,
+  "classifyMessage": {
+    "name": "classify_message",
+    "iterations": 150000,
+    "minNanos": 0,
+    "p50Nanos": 83,
+    "p95Nanos": 84,
+    "p99Nanos": 125,
+    "maxNanos": 57500,
+    "meanNanos": 62
+  },
+  "reducer": {
+    "name": "reducer",
+    "iterations": 150000,
+    "minNanos": 0,
+    "p50Nanos": 250,
+    "p95Nanos": 792,
+    "p99Nanos": 916,
+    "maxNanos": 165625,
+    "meanNanos": 345
+  },
+  "approvalRouting": {
+    "name": "approval_routing",
+    "iterations": 150000,
+    "minNanos": 0,
+    "p50Nanos": 0,
+    "p95Nanos": 42,
+    "p99Nanos": 42,
+    "maxNanos": 125,
+    "meanNanos": 19
+  },
+  "hookPreH0": {
+    "name": "hook_pre_h0",
+    "iterations": 150000,
+    "minNanos": 0,
+    "p50Nanos": 42,
+    "p95Nanos": 84,
+    "p99Nanos": 84,
+    "maxNanos": 63083,
+    "meanNanos": 52
+  },
+  "hookPreH1": {
+    "name": "hook_pre_h1",
+    "iterations": 150000,
+    "minNanos": 0,
+    "p50Nanos": 42,
+    "p95Nanos": 84,
+    "p99Nanos": 84,
+    "maxNanos": 44375,
+    "meanNanos": 60
+  },
+  "hookPreH3": {
+    "name": "hook_pre_h3",
+    "iterations": 150000,
+    "minNanos": 41,
+    "p50Nanos": 125,
+    "p95Nanos": 125,
+    "p99Nanos": 125,
+    "maxNanos": 24916,
+    "meanNanos": 119
+  },
+  "hookPreH5": {
+    "name": "hook_pre_h5",
+    "iterations": 150000,
+    "minNanos": 83,
+    "p50Nanos": 167,
+    "p95Nanos": 208,
+    "p99Nanos": 209,
+    "maxNanos": 114791,
+    "meanNanos": 171
+  },
+  "adapterDirectSync": {
+    "name": "adapter_direct_sync",
+    "iterations": 150000,
+    "minNanos": 0,
+    "p50Nanos": 0,
+    "p95Nanos": 42,
+    "p99Nanos": 42,
+    "maxNanos": 33416,
+    "meanNanos": 18
+  },
+  "adapterDynSync": {
+    "name": "adapter_dyn_sync",
+    "iterations": 150000,
+    "minNanos": 0,
+    "p50Nanos": 0,
+    "p95Nanos": 42,
+    "p99Nanos": 42,
+    "maxNanos": 125,
+    "meanNanos": 18
+  },
+  "adapterOverhead": {
+    "directP95Nanos": 42,
+    "dynP95Nanos": 42,
+    "p95OverheadRatio": 0.0
+  }
+}

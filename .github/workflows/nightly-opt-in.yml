@@ -1,0 +1,35 @@
+name: nightly-opt-in
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  script-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run script smoke harness
+        run: bash scripts/smoke_script_harness.sh
+
+  real-cli-opt-in:
+    if: ${{ vars.COCLAI_ENABLE_REAL_CLI_NIGHTLY == '1' }}
+    runs-on: self-hosted
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run nightly opt-in gate
+        run: bash scripts/run_nightly_opt_in_gate.sh
+
+      - name: Upload opt-in gate logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-opt-in-logs
+          path: target/qa/nightly_opt_in

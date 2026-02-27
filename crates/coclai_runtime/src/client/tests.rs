@@ -283,6 +283,7 @@ fn session_config_defaults_are_explicit() {
         cfg.sandbox_policy,
         SandboxPolicy::Preset(SandboxPreset::ReadOnly)
     );
+    assert!(!cfg.privileged_escalation_approved);
     assert_eq!(cfg.timeout, Duration::from_secs(120));
     assert!(cfg.attachments.is_empty());
 }
@@ -297,6 +298,7 @@ fn run_profile_defaults_are_explicit() {
         profile.sandbox_policy,
         SandboxPolicy::Preset(SandboxPreset::ReadOnly)
     );
+    assert!(!profile.privileged_escalation_approved);
     assert_eq!(profile.timeout, Duration::from_secs(120));
     assert!(profile.attachments.is_empty());
 }
@@ -311,6 +313,7 @@ fn session_config_from_profile_maps_all_fields() {
             writable_roots: vec!["/work".to_owned()],
             network_access: false,
         }))
+        .allow_privileged_escalation()
         .with_timeout(Duration::from_secs(33))
         .with_attachment(PromptAttachment::ImageUrl {
             url: "https://example.com/a.png".to_owned(),
@@ -328,6 +331,7 @@ fn session_config_from_profile_maps_all_fields() {
             network_access: false,
         })
     );
+    assert!(cfg.privileged_escalation_approved);
     assert_eq!(cfg.timeout, Duration::from_secs(33));
     assert_eq!(
         cfg.attachments,
@@ -350,6 +354,7 @@ fn session_prompt_params_maps_config_and_prompt() {
             writable_roots: vec!["/work".to_owned()],
             network_access: false,
         }))
+        .allow_privileged_escalation()
         .with_timeout(Duration::from_secs(33))
         .with_attachment(PromptAttachment::ImageUrl {
             url: "https://example.com/a.png".to_owned(),
@@ -368,6 +373,7 @@ fn session_prompt_params_maps_config_and_prompt() {
             network_access: false,
         })
     );
+    assert!(params.privileged_escalation_approved);
     assert_eq!(params.timeout, Duration::from_secs(33));
     assert_eq!(
         params.attachments,
@@ -387,6 +393,7 @@ fn profile_to_prompt_params_maps_profile_and_input() {
             writable_roots: vec!["/tmp/work".to_owned()],
             network_access: true,
         }))
+        .allow_privileged_escalation()
         .with_timeout(Duration::from_secs(15))
         .attach_path("README.md");
 
@@ -403,6 +410,7 @@ fn profile_to_prompt_params_maps_profile_and_input() {
             network_access: true,
         })
     );
+    assert!(params.privileged_escalation_approved);
     assert_eq!(params.timeout, Duration::from_secs(15));
     assert_eq!(
         params.attachments,
@@ -425,6 +433,50 @@ fn session_open_guards_return_error_when_closed() {
     assert!(matches!(
         rpc_err,
         crate::errors::RpcError::InvalidRequest(_)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_close_keeps_local_handle_closed_when_archive_rpc_fails() {
+    let temp = TempDir::new("coclai_client_session_close_failure");
+    let cli = write_mock_cli_script(&temp.root);
+    let schema_dir = workspace_schema_dir();
+
+    let client = super::Client::connect(
+        ClientConfig::new()
+            .with_cli_bin(cli)
+            .with_schema_dir(schema_dir),
+    )
+    .await
+    .expect("client connect");
+
+    let session = client
+        .start_session(SessionConfig::new(temp.root.to_string_lossy().to_string()))
+        .await
+        .expect("start session");
+
+    client.shutdown().await.expect("shutdown runtime");
+
+    let err = session
+        .close()
+        .await
+        .expect_err("close must fail after shutdown");
+    assert!(matches!(err, crate::errors::RpcError::InvalidRequest(_)));
+    assert!(session.is_closed());
+
+    let second = session
+        .close()
+        .await
+        .expect_err("repeated close must return same cached error");
+    assert_eq!(second, err);
+
+    let ask_err = session
+        .ask("must fail")
+        .await
+        .expect_err("session is closed");
+    assert!(matches!(
+        ask_err,
+        crate::api::PromptRunError::Rpc(crate::errors::RpcError::InvalidRequest(_))
     ));
 }
 

@@ -1,3 +1,4 @@
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
 use coclai_runtime::{
@@ -7,21 +8,16 @@ use coclai_runtime::{
 
 /// Canonical app-server JSON-RPC method names.
 pub mod methods {
-    pub const THREAD_START: &str = "thread/start";
-    pub const THREAD_RESUME: &str = "thread/resume";
-    pub const THREAD_FORK: &str = "thread/fork";
-    pub const THREAD_ARCHIVE: &str = "thread/archive";
-    pub const THREAD_READ: &str = "thread/read";
-    pub const THREAD_LIST: &str = "thread/list";
-    pub const THREAD_LOADED_LIST: &str = "thread/loaded/list";
-    pub const THREAD_ROLLBACK: &str = "thread/rollback";
-    pub const TURN_START: &str = "turn/start";
-    pub const TURN_INTERRUPT: &str = "turn/interrupt";
+    pub use coclai_runtime::rpc_contract::methods::{
+        THREAD_ARCHIVE, THREAD_FORK, THREAD_LIST, THREAD_LOADED_LIST, THREAD_READ, THREAD_RESUME,
+        THREAD_ROLLBACK, THREAD_START, TURN_INTERRUPT, TURN_START,
+    };
 }
 
 /// Thin, explicit JSON-RPC facade for codex app-server.
 ///
 /// - `request_json` / `notify_json`: validated calls for known methods.
+/// - `request_typed` / `notify_typed`: typed wrappers with contract validation.
 /// - `*_unchecked`: bypass contract checks for experimental/custom methods.
 /// - server request loop is exposed directly for approval/user-input workflows.
 #[derive(Clone)]
@@ -60,6 +56,35 @@ impl AppServer {
             .await
     }
 
+    /// Typed JSON-RPC request for known methods.
+    pub async fn request_typed<P, R>(&self, method: &str, params: P) -> Result<R, RpcError>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        self.client
+            .runtime()
+            .call_typed_validated(method, params)
+            .await
+    }
+
+    /// Typed JSON-RPC request with explicit validation mode.
+    pub async fn request_typed_with_mode<P, R>(
+        &self,
+        method: &str,
+        params: P,
+        mode: RpcValidationMode,
+    ) -> Result<R, RpcError>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        self.client
+            .runtime()
+            .call_typed_validated_with_mode(method, params, mode)
+            .await
+    }
+
     /// Unchecked JSON-RPC request.
     /// Use for experimental/custom methods where strict contracts are not fixed yet.
     pub async fn request_json_unchecked(
@@ -85,6 +110,33 @@ impl AppServer {
         self.client
             .runtime()
             .notify_validated_with_mode(method, params, mode)
+            .await
+    }
+
+    /// Typed JSON-RPC notification for known methods.
+    pub async fn notify_typed<P>(&self, method: &str, params: P) -> Result<(), RuntimeError>
+    where
+        P: Serialize,
+    {
+        self.client
+            .runtime()
+            .notify_typed_validated(method, params)
+            .await
+    }
+
+    /// Typed JSON-RPC notification with explicit validation mode.
+    pub async fn notify_typed_with_mode<P>(
+        &self,
+        method: &str,
+        params: P,
+        mode: RpcValidationMode,
+    ) -> Result<(), RuntimeError>
+    where
+        P: Serialize,
+    {
+        self.client
+            .runtime()
+            .notify_typed_validated_with_mode(method, params, mode)
             .await
     }
 
@@ -149,6 +201,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
 
     use super::*;
@@ -252,6 +305,51 @@ for line in sys.stdin:
         app.shutdown().await.expect("shutdown");
     }
 
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct ThreadStartTypedResult {
+        thread: ThreadIdOnly,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct ThreadIdOnly {
+        id: String,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct TurnInterruptNotifyMissingTurnId {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct TurnInterruptNotifyParams {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "turnId")]
+        turn_id: String,
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_typed_validates_and_deserializes_known_method_payload() {
+        let temp = TempDir::new("coclai_appserver_typed");
+        let cli = write_mock_cli_script(&temp.root);
+        let app = AppServer::connect(
+            ClientConfig::new()
+                .with_cli_bin(cli)
+                .with_schema_dir(workspace_schema_dir()),
+        )
+        .await
+        .expect("connect appserver");
+
+        let out: ThreadStartTypedResult = app
+            .request_typed(methods::THREAD_START, json!({}))
+            .await
+            .expect("typed request");
+        assert_eq!(out.thread.id, "thr_rpc");
+
+        app.shutdown().await.expect("shutdown");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn request_json_rejects_invalid_known_params() {
         let temp = TempDir::new("coclai_appserver_invalid");
@@ -312,6 +410,57 @@ for line in sys.stdin:
             .await
             .expect_err("missing turnId must fail");
         assert!(matches!(err, RuntimeError::InvalidConfig(_)));
+
+        app.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notify_typed_rejects_invalid_known_params() {
+        let temp = TempDir::new("coclai_appserver_notify_typed_invalid");
+        let cli = write_mock_cli_script(&temp.root);
+        let app = AppServer::connect(
+            ClientConfig::new()
+                .with_cli_bin(cli)
+                .with_schema_dir(workspace_schema_dir()),
+        )
+        .await
+        .expect("connect appserver");
+
+        let err = app
+            .notify_typed(
+                methods::TURN_INTERRUPT,
+                TurnInterruptNotifyMissingTurnId {
+                    thread_id: "thr".to_owned(),
+                },
+            )
+            .await
+            .expect_err("missing turnId must fail");
+        assert!(matches!(err, RuntimeError::InvalidConfig(_)));
+
+        app.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notify_typed_accepts_valid_known_params() {
+        let temp = TempDir::new("coclai_appserver_notify_typed_valid");
+        let cli = write_mock_cli_script(&temp.root);
+        let app = AppServer::connect(
+            ClientConfig::new()
+                .with_cli_bin(cli)
+                .with_schema_dir(workspace_schema_dir()),
+        )
+        .await
+        .expect("connect appserver");
+
+        app.notify_typed(
+            methods::TURN_INTERRUPT,
+            TurnInterruptNotifyParams {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn".to_owned(),
+            },
+        )
+        .await
+        .expect("typed notify");
 
         app.shutdown().await.expect("shutdown");
     }

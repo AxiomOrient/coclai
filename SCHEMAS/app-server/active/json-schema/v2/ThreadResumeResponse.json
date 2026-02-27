@@ -45,93 +45,47 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
-    "Annotations": {
-      "description": "Optional annotations for the client. The client can use annotations to inform how objects are used or displayed",
-      "type": "object",
-      "properties": {
-        "audience": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "$ref": "#/definitions/Role"
-          }
-        },
-        "lastModified": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "priority": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        }
-      }
-    },
     "AskForApproval": {
-      "type": "string",
-      "enum": [
-        "untrusted",
-        "on-failure",
-        "on-request",
-        "never"
-      ]
-    },
-    "AudioContent": {
-      "description": "Audio provided to or from an LLM.",
-      "type": "object",
-      "required": [
-        "data",
-        "mimeType",
-        "type"
-      ],
-      "properties": {
-        "annotations": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Annotations"
-            },
-            {
-              "type": "null"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "untrusted",
+            "on-failure",
+            "on-request",
+            "never"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "reject"
+          ],
+          "properties": {
+            "reject": {
+              "type": "object",
+              "required": [
+                "mcp_elicitations",
+                "rules",
+                "sandbox_approval"
+              ],
+              "properties": {
+                "mcp_elicitations": {
+                  "type": "boolean"
+                },
+                "rules": {
+                  "type": "boolean"
+                },
+                "sandbox_approval": {
+                  "type": "boolean"
+                }
+              }
             }
-          ]
-        },
-        "data": {
-          "type": "string"
-        },
-        "mimeType": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string"
+          },
+          "additionalProperties": false,
+          "title": "RejectAskForApproval"
         }
-      }
-    },
-    "BlobResourceContents": {
-      "type": "object",
-      "required": [
-        "blob",
-        "uri"
-      ],
-      "properties": {
-        "blob": {
-          "type": "string"
-        },
-        "mimeType": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "uri": {
-          "type": "string"
-        }
-      }
+      ]
     },
     "ByteRange": {
       "type": "object",
@@ -160,6 +114,7 @@
           "enum": [
             "contextWindowExceeded",
             "usageLimitExceeded",
+            "serverOverloaded",
             "internalServerError",
             "unauthorized",
             "badRequest",
@@ -298,6 +253,7 @@
       "enum": [
         "spawnAgent",
         "sendInput",
+        "resumeAgent",
         "wait",
         "closeAgent"
       ]
@@ -429,61 +385,6 @@
         "declined"
       ]
     },
-    "ContentBlock": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/TextContent"
-        },
-        {
-          "$ref": "#/definitions/ImageContent"
-        },
-        {
-          "$ref": "#/definitions/AudioContent"
-        },
-        {
-          "$ref": "#/definitions/ResourceLink"
-        },
-        {
-          "$ref": "#/definitions/EmbeddedResource"
-        }
-      ]
-    },
-    "EmbeddedResource": {
-      "description": "The contents of a resource, embedded into a prompt or tool call result.\n\nIt is up to the client how best to render embedded resources for the benefit of the LLM and/or the user.",
-      "type": "object",
-      "required": [
-        "resource",
-        "type"
-      ],
-      "properties": {
-        "annotations": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Annotations"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "resource": {
-          "$ref": "#/definitions/EmbeddedResourceResource"
-        },
-        "type": {
-          "type": "string"
-        }
-      }
-    },
-    "EmbeddedResourceResource": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/TextResourceContents"
-        },
-        {
-          "$ref": "#/definitions/BlobResourceContents"
-        }
-      ]
-    },
     "FileUpdateChange": {
       "type": "object",
       "required": [
@@ -526,36 +427,6 @@
         }
       }
     },
-    "ImageContent": {
-      "description": "An image provided to or from an LLM.",
-      "type": "object",
-      "required": [
-        "data",
-        "mimeType",
-        "type"
-      ],
-      "properties": {
-        "annotations": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Annotations"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "data": {
-          "type": "string"
-        },
-        "mimeType": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string"
-        }
-      }
-    },
     "McpToolCallError": {
       "type": "object",
       "required": [
@@ -575,9 +446,7 @@
       "properties": {
         "content": {
           "type": "array",
-          "items": {
-            "$ref": "#/definitions/ContentBlock"
-          }
+          "items": true
         },
         "structuredContent": true
       }
@@ -588,6 +457,25 @@
         "inProgress",
         "completed",
         "failed"
+      ]
+    },
+    "MessagePhase": {
+      "description": "Classifies an assistant message as interim commentary or final answer text.\n\nProviders do not emit this consistently, so callers must treat `None` as \"phase unknown\" and keep compatibility behavior for legacy models.",
+      "oneOf": [
+        {
+          "description": "Mid-turn assistant text (for example preamble/progress narration).\n\nAdditional tool calls or assistant output may follow before turn completion.",
+          "type": "string",
+          "enum": [
+            "commentary"
+          ]
+        },
+        {
+          "description": "The assistant's terminal answer text for the current turn.",
+          "type": "string",
+          "enum": [
+            "final_answer"
+          ]
+        }
       ]
     },
     "NetworkAccess": {
@@ -664,6 +552,53 @@
         }
       ]
     },
+    "ReadOnlyAccess": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "includePlatformDefaults": {
+              "default": true,
+              "type": "boolean"
+            },
+            "readableRoots": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/AbsolutePathBuf"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "restricted"
+              ],
+              "title": "RestrictedReadOnlyAccessType"
+            }
+          },
+          "title": "RestrictedReadOnlyAccess"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "fullAccess"
+              ],
+              "title": "FullAccessReadOnlyAccessType"
+            }
+          },
+          "title": "FullAccessReadOnlyAccess"
+        }
+      ]
+    },
     "ReasoningEffort": {
       "description": "See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning",
       "type": "string",
@@ -674,69 +609,6 @@
         "medium",
         "high",
         "xhigh"
-      ]
-    },
-    "ResourceLink": {
-      "description": "A resource that the server is capable of reading, included in a prompt or tool call result.\n\nNote: resource links returned by tools are not guaranteed to appear in the results of `resources/list` requests.",
-      "type": "object",
-      "required": [
-        "name",
-        "type",
-        "uri"
-      ],
-      "properties": {
-        "annotations": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Annotations"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "mimeType": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "type": "string"
-        },
-        "size": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int64"
-        },
-        "title": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "type": {
-          "type": "string"
-        },
-        "uri": {
-          "type": "string"
-        }
-      }
-    },
-    "Role": {
-      "description": "The sender or recipient of messages and data in a conversation.",
-      "type": "string",
-      "enum": [
-        "assistant",
-        "user"
       ]
     },
     "SandboxPolicy": {
@@ -763,6 +635,16 @@
             "type"
           ],
           "properties": {
+            "access": {
+              "default": {
+                "type": "fullAccess"
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ReadOnlyAccess"
+                }
+              ]
+            },
             "type": {
               "type": "string",
               "enum": [
@@ -815,6 +697,16 @@
               "default": false,
               "type": "boolean"
             },
+            "readOnlyAccess": {
+              "default": {
+                "type": "fullAccess"
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ReadOnlyAccess"
+                }
+              ]
+            },
             "type": {
               "type": "string",
               "enum": [
@@ -835,40 +727,96 @@
       ]
     },
     "SessionSource": {
-      "type": "string",
-      "enum": [
-        "cli",
-        "vscode",
-        "exec",
-        "appServer",
-        "unknown"
-      ]
-    },
-    "TextContent": {
-      "description": "Text provided to or from an LLM.",
-      "type": "object",
-      "required": [
-        "text",
-        "type"
-      ],
-      "properties": {
-        "annotations": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Annotations"
-            },
-            {
-              "type": "null"
-            }
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "cli",
+            "vscode",
+            "exec",
+            "appServer",
+            "unknown"
           ]
         },
-        "text": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string"
+        {
+          "type": "object",
+          "required": [
+            "subAgent"
+          ],
+          "properties": {
+            "subAgent": {
+              "$ref": "#/definitions/SubAgentSource"
+            }
+          },
+          "additionalProperties": false,
+          "title": "SubAgentSessionSource"
         }
-      }
+      ]
+    },
+    "SubAgentSource": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "review",
+            "compact",
+            "memory_consolidation"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "thread_spawn"
+          ],
+          "properties": {
+            "thread_spawn": {
+              "type": "object",
+              "required": [
+                "depth",
+                "parent_thread_id"
+              ],
+              "properties": {
+                "agent_nickname": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "agent_role": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "depth": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "parent_thread_id": {
+                  "$ref": "#/definitions/ThreadId"
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "title": "ThreadSpawnSubAgentSource"
+        },
+        {
+          "type": "object",
+          "required": [
+            "other"
+          ],
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "title": "OtherSubAgentSource"
+        }
+      ]
     },
     "TextElement": {
       "type": "object",
@@ -893,27 +841,6 @@
         }
       }
     },
-    "TextResourceContents": {
-      "type": "object",
-      "required": [
-        "text",
-        "uri"
-      ],
-      "properties": {
-        "mimeType": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "text": {
-          "type": "string"
-        },
-        "uri": {
-          "type": "string"
-        }
-      }
-    },
     "Thread": {
       "type": "object",
       "required": [
@@ -922,13 +849,27 @@
         "cwd",
         "id",
         "modelProvider",
-        "path",
         "preview",
         "source",
+        "status",
         "turns",
         "updatedAt"
       ],
       "properties": {
+        "agentNickname": {
+          "description": "Optional random unique nickname assigned to an AgentControl-spawned sub-agent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentRole": {
+          "description": "Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "cliVersion": {
           "description": "Version of the CLI that created the thread.",
           "type": "string"
@@ -960,9 +901,19 @@
           "description": "Model provider used for this thread (for example, 'openai').",
           "type": "string"
         },
+        "name": {
+          "description": "Optional user-facing thread title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
           "description": "[UNSTABLE] Path to the thread on disk.",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "preview": {
           "description": "Usually the first user message in the thread, if available.",
@@ -973,6 +924,14 @@
           "allOf": [
             {
               "$ref": "#/definitions/SessionSource"
+            }
+          ]
+        },
+        "status": {
+          "description": "Current runtime status for the thread.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadStatus"
             }
           ]
         },
@@ -989,6 +948,16 @@
           "format": "int64"
         }
       }
+    },
+    "ThreadActiveFlag": {
+      "type": "string",
+      "enum": [
+        "waitingOnApproval",
+        "waitingOnUserInput"
+      ]
+    },
+    "ThreadId": {
+      "type": "string"
     },
     "ThreadItem": {
       "oneOf": [
@@ -1030,6 +999,17 @@
             "id": {
               "type": "string"
             },
+            "phase": {
+              "default": null,
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/MessagePhase"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "text": {
               "type": "string"
             },
@@ -1042,6 +1022,31 @@
             }
           },
           "title": "AgentMessageThreadItem"
+        },
+        {
+          "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
+          "type": "object",
+          "required": [
+            "id",
+            "text",
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "plan"
+              ],
+              "title": "PlanThreadItemType"
+            }
+          },
+          "title": "PlanThreadItem"
         },
         {
           "type": "object",
@@ -1317,6 +1322,16 @@
             "type"
           ],
           "properties": {
+            "action": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchAction"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "id": {
               "type": "string"
             },
@@ -1404,6 +1419,101 @@
             }
           },
           "title": "ExitedReviewModeThreadItem"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "contextCompaction"
+              ],
+              "title": "ContextCompactionThreadItemType"
+            }
+          },
+          "title": "ContextCompactionThreadItem"
+        }
+      ]
+    },
+    "ThreadStatus": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "notLoaded"
+              ],
+              "title": "NotLoadedThreadStatusType"
+            }
+          },
+          "title": "NotLoadedThreadStatus"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "idle"
+              ],
+              "title": "IdleThreadStatusType"
+            }
+          },
+          "title": "IdleThreadStatus"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "systemError"
+              ],
+              "title": "SystemErrorThreadStatusType"
+            }
+          },
+          "title": "SystemErrorThreadStatus"
+        },
+        {
+          "type": "object",
+          "required": [
+            "activeFlags",
+            "type"
+          ],
+          "properties": {
+            "activeFlags": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ThreadActiveFlag"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "active"
+              ],
+              "title": "ActiveThreadStatusType"
+            }
+          },
+          "title": "ActiveThreadStatus"
         }
       ]
     },
@@ -1571,6 +1681,131 @@
             }
           },
           "title": "SkillUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "path",
+            "type"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "mention"
+              ],
+              "title": "MentionUserInputType"
+            }
+          },
+          "title": "MentionUserInput"
+        }
+      ]
+    },
+    "WebSearchAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "queries": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "query": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "search"
+              ],
+              "title": "SearchWebSearchActionType"
+            }
+          },
+          "title": "SearchWebSearchAction"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "openPage"
+              ],
+              "title": "OpenPageWebSearchActionType"
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "title": "OpenPageWebSearchAction"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "pattern": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "findInPage"
+              ],
+              "title": "FindInPageWebSearchActionType"
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "title": "FindInPageWebSearchAction"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "other"
+              ],
+              "title": "OtherWebSearchActionType"
+            }
+          },
+          "title": "OtherWebSearchAction"
         }
       ]
     }

@@ -14,6 +14,20 @@
     }
   },
   "definitions": {
+    "SkillDependencies": {
+      "type": "object",
+      "required": [
+        "tools"
+      ],
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SkillToolDependency"
+          }
+        }
+      }
+    },
     "SkillErrorInfo": {
       "type": "object",
       "required": [
@@ -80,6 +94,16 @@
         "scope"
       ],
       "properties": {
+        "dependencies": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SkillDependencies"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "description": {
           "type": "string"
         },
@@ -106,7 +130,7 @@
           "$ref": "#/definitions/SkillScope"
         },
         "shortDescription": {
-          "description": "Legacy short_description from SKILL.md. Prefer SKILL.toml interface.short_description.",
+          "description": "Legacy short_description from SKILL.md. Prefer SKILL.json interface.short_description.",
           "type": [
             "string",
             "null"
@@ -122,6 +146,45 @@
         "system",
         "admin"
       ]
+    },
+    "SkillToolDependency": {
+      "type": "object",
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      }
     },
     "SkillsListEntry": {
       "type": "object",

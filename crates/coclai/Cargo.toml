@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 coclai_runtime = { path = "../coclai_runtime" }
 thiserror = "2"
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

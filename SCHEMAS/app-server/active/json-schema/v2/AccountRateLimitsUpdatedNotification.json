@@ -36,6 +36,7 @@
       "type": "string",
       "enum": [
         "free",
+        "go",
         "plus",
         "pro",
         "team",
@@ -56,6 +57,18 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "limitId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limitName": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "planType": {

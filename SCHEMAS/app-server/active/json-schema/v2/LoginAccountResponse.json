@@ -42,6 +42,22 @@
         }
       },
       "title": "Chatgptv2::LoginAccountResponse"
+    },
+    {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "chatgptAuthTokens"
+          ],
+          "title": "ChatgptAuthTokensv2::LoginAccountResponseType"
+        }
+      },
+      "title": "ChatgptAuthTokensv2::LoginAccountResponse"
     }
   ]
 }

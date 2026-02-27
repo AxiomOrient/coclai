@@ -24,3 +24,6 @@ jobs:
 
       - name: schema manifest
         run: bash scripts/check_schema_manifest.sh
+
+      - name: script smoke harness
+        run: bash scripts/smoke_script_harness.sh

@@ -1,10 +1,21 @@
 use serde_json::Value;
 
 use crate::errors::{RpcError, RpcErrorObject};
-use crate::events::MsgKind;
+use crate::events::{JsonRpcId, MsgKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtractedIds {
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub item_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MsgMetadata {
+    pub kind: MsgKind,
+    pub response_id: Option<u64>,
+    pub rpc_id: Option<JsonRpcId>,
+    pub method: Option<String>,
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
     pub item_id: Option<String>,
@@ -69,6 +80,69 @@ pub fn extract_ids(json: &Value) -> ExtractedIds {
     }
 }
 
+/// Extract commonly used dispatch metadata in one pass over top-level keys.
+/// Allocation: owned method/id strings only when present. Complexity: O(1).
+pub fn extract_message_metadata(json: &Value) -> MsgMetadata {
+    let obj = json.as_object();
+    let id_value = obj.and_then(|value| value.get("id"));
+    let method_value = obj.and_then(|value| value.get("method"));
+    let result_value = obj.and_then(|value| value.get("result"));
+    let error_value = obj.and_then(|value| value.get("error"));
+
+    let has_id = id_value.is_some();
+    let has_method = method_value.is_some();
+    let has_result = result_value.is_some();
+    let has_error = error_value.is_some();
+    let kind = if has_id && !has_method && (has_result || has_error) {
+        MsgKind::Response
+    } else if has_id && has_method && !has_result && !has_error {
+        MsgKind::ServerRequest
+    } else if has_method && !has_id {
+        MsgKind::Notification
+    } else {
+        MsgKind::Unknown
+    };
+
+    let method = method_value.and_then(Value::as_str).map(ToOwned::to_owned);
+    let response_id = parse_response_rpc_id_value(id_value);
+    let rpc_id = parse_jsonrpc_id_value(id_value);
+
+    let roots = [
+        obj.and_then(|value| value.get("params")),
+        result_value,
+        error_value.and_then(|value| value.get("data")),
+        Some(json),
+    ];
+
+    let mut thread_id = None;
+    let mut turn_id = None;
+    let mut item_id = None;
+    for root in roots.into_iter().flatten() {
+        if thread_id.is_none() {
+            thread_id = get_thread_id(root).map(ToOwned::to_owned);
+        }
+        if turn_id.is_none() {
+            turn_id = get_turn_id(root).map(ToOwned::to_owned);
+        }
+        if item_id.is_none() {
+            item_id = get_item_id(root).map(ToOwned::to_owned);
+        }
+        if thread_id.is_some() && turn_id.is_some() && item_id.is_some() {
+            break;
+        }
+    }
+
+    MsgMetadata {
+        kind,
+        response_id,
+        rpc_id,
+        method,
+        thread_id,
+        turn_id,
+        item_id,
+    }
+}
+
 /// Map a JSON-RPC error object into a typed error enum.
 /// Allocation: message clone + optional data clone. Complexity: O(1).
 pub fn map_rpc_error(json_error: &Value) -> RpcError {
@@ -124,6 +198,22 @@ fn get_turn_id(root: &Value) -> Option<&str> {
 
 fn get_item_id(root: &Value) -> Option<&str> {
     get_str_field(root, "itemId").or_else(|| get_nested_id_field(root, "item"))
+}
+
+fn parse_response_rpc_id_value(id_value: Option<&Value>) -> Option<u64> {
+    match id_value {
+        Some(Value::Number(number)) => number.as_u64(),
+        Some(Value::String(text)) => text.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn parse_jsonrpc_id_value(id_value: Option<&Value>) -> Option<JsonRpcId> {
+    match id_value {
+        Some(Value::Number(number)) => number.as_u64().map(JsonRpcId::Number),
+        Some(Value::String(text)) => Some(JsonRpcId::Text(text.clone())),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -203,5 +293,45 @@ mod tests {
     fn map_overloaded_error() {
         let v = json!({"code": -32001, "message": "ingress overload"});
         assert_eq!(map_rpc_error(&v), RpcError::Overloaded);
+    }
+
+    #[test]
+    fn extract_message_metadata_matches_legacy_helpers() {
+        let fixtures = vec![
+            json!({
+                "id": 1,
+                "result": {
+                    "thread": {"id": "thr_1"},
+                    "turn": {"id": "turn_1"},
+                    "item": {"id": "item_1"}
+                }
+            }),
+            json!({
+                "id": "42",
+                "method": "item/fileChange/requestApproval",
+                "params": {
+                    "threadId": "thr_2",
+                    "turnId": "turn_2",
+                    "itemId": "item_2"
+                }
+            }),
+            json!({
+                "method": "turn/started",
+                "params": {
+                    "thread": {"id": "thr_3"},
+                    "turn": {"id": "turn_3"}
+                }
+            }),
+        ];
+
+        for fixture in fixtures {
+            let meta = extract_message_metadata(&fixture);
+            let ids = extract_ids(&fixture);
+
+            assert_eq!(meta.kind, classify_message(&fixture));
+            assert_eq!(meta.thread_id, ids.thread_id);
+            assert_eq!(meta.turn_id, ids.turn_id);
+            assert_eq!(meta.item_id, ids.item_id);
+        }
     }
 }

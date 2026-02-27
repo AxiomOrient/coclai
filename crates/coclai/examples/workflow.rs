@@ -1,6 +1,4 @@
-use coclai::{
-    ApprovalPolicy, ReasoningEffort, SandboxPolicy, SandboxPreset, Workflow, WorkflowConfig,
-};
+use coclai::{ReasoningEffort, Workflow, WorkflowConfig};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,18 +10,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prompt = std::env::var("COCLAI_PROMPT")
         .unwrap_or_else(|_| "README.md를 읽고 핵심 3가지를 정리해줘".to_owned());
 
-    let config = WorkflowConfig::new(cwd.clone())
-        .with_model("gpt-5-codex")
-        .with_effort(ReasoningEffort::High)
-        .with_approval_policy(ApprovalPolicy::OnRequest)
-        .with_sandbox_policy(SandboxPolicy::Preset(SandboxPreset::WorkspaceWrite {
-            writable_roots: vec![cwd],
-            network_access: false,
-        }));
+    let resolved_cwd = WorkflowConfig::new(cwd).cwd;
 
-    let workflow = Workflow::connect(config).await?;
-    let out = workflow.run(prompt).await?;
+    let config = WorkflowConfig::new(resolved_cwd)
+        .with_model("gpt-5-codex")
+        .with_effort(ReasoningEffort::High);
+
+    let workflow = match Workflow::connect(config).await {
+        Ok(workflow) => workflow,
+        Err(err) => return Err(Box::<dyn std::error::Error>::from(err)),
+    };
+    let run_result = workflow.run(prompt).await;
+    let shutdown_result = workflow.shutdown().await;
+
+    let out = match run_result {
+        Ok(out) => out,
+        Err(run_err) => {
+            if let Err(shutdown_err) = shutdown_result {
+                eprintln!("warning: workflow shutdown failed after run error: {shutdown_err}");
+            }
+            return Err(Box::<dyn std::error::Error>::from(run_err));
+        }
+    };
+    if let Err(shutdown_err) = shutdown_result {
+        return Err(Box::<dyn std::error::Error>::from(shutdown_err));
+    }
     println!("{}", out.assistant_text);
-    workflow.shutdown().await?;
     Ok(())
 }

@@ -184,6 +184,13 @@ for line in sys.stdin:
         sys.stdout.flush()
         continue
 
+    if method == "thread/resume":
+        thread_id = params.get("threadId", "thr_prompt")
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"threadId": thread_id}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"thread/started","params":{"threadId":thread_id}}) + "\n")
+        sys.stdout.flush()
+        continue
+
     if method == "turn/start":
         thread_id = params.get("threadId", "thr_prompt")
         turn_id = "turn_prompt"
@@ -659,6 +666,173 @@ for line in sys.stdin:
     spec
 }
 
+fn python_thread_resume_missing_id_process() -> StdioProcessSpec {
+    let script = r#"
+import json
+import sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    method = msg.get("method")
+    rpc_id = msg.get("id")
+
+    if method == "initialize" and rpc_id is not None:
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ready": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if rpc_id is None:
+        continue
+
+    if method == "thread/resume":
+        # Deliberately omit thread id to validate client-side contract checks.
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"echoMethod": method}}) + "\n")
+    sys.stdout.flush()
+"#;
+
+    let mut spec = StdioProcessSpec::new("python3");
+    spec.args = vec!["-u".to_owned(), "-c".to_owned(), script.to_owned()];
+    spec
+}
+
+fn python_thread_resume_mismatched_id_process() -> StdioProcessSpec {
+    let script = r#"
+import json
+import sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    method = msg.get("method")
+    rpc_id = msg.get("id")
+
+    if method == "initialize" and rpc_id is not None:
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ready": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if rpc_id is None:
+        continue
+
+    if method == "thread/resume":
+        # Deliberately return an id different from the requested one.
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"threadId": "thr_unexpected"}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"echoMethod": method}}) + "\n")
+    sys.stdout.flush()
+"#;
+
+    let mut spec = StdioProcessSpec::new("python3");
+    spec.args = vec!["-u".to_owned(), "-c".to_owned(), script.to_owned()];
+    spec
+}
+
+fn python_run_prompt_lagged_completion_process() -> StdioProcessSpec {
+    let script = r#"
+import json
+import sys
+
+def make_thread(thread_id):
+    return {
+        "id": thread_id,
+        "cliVersion": "0.104.0",
+        "createdAt": 1700000000,
+        "cwd": "/tmp",
+        "modelProvider": "openai",
+        "path": f"/tmp/threads/{thread_id}.jsonl",
+        "preview": "hello",
+        "source": "app-server",
+        "turns": [],
+        "updatedAt": 1700000001,
+    }
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    method = msg.get("method")
+    rpc_id = msg.get("id")
+    params = msg.get("params") or {}
+
+    if method == "initialize" and rpc_id is not None:
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ready": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if rpc_id is None:
+        continue
+
+    if method == "thread/start":
+        thread_id = "thr_lagged"
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": thread_id}}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"thread/started","params":{"threadId":thread_id}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "turn/start":
+        thread_id = params.get("threadId", "thr_lagged")
+        turn_id = "turn_lagged"
+        sys.stdout.write(json.dumps({"method":"turn/started","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"item/started","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_lagged","itemType":"agentMessage"}}) + "\n")
+        for i in range(8):
+            sys.stdout.write(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_lagged","delta":f"chunk-{i}"}}) + "\n")
+        # Terminal event may be dropped when live receiver lags.
+        sys.stdout.write(json.dumps({"method":"turn/completed","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        # Keep one non-terminal tail event so a lagged receiver cannot rely on stream terminal events.
+        sys.stdout.write(json.dumps({"method":"item/started","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_tail","itemType":"reasoning"}}) + "\n")
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"turn": {"id": turn_id}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/read":
+        thread_id = params.get("threadId", "thr_lagged")
+        thread = make_thread(thread_id)
+        if params.get("includeTurns"):
+            thread["turns"] = [{
+                "id": "turn_lagged",
+                "status": "completed",
+                "items": [
+                    {"id": "item_lagged_final", "type": "agentMessage", "text": "ok-from-thread-read"}
+                ],
+            }]
+        out = {"id": rpc_id, "result": {"thread": thread}}
+        sys.stdout.write(json.dumps(out) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"echoMethod": method, "params": params}}) + "\n")
+    sys.stdout.flush()
+"#;
+
+    let mut spec = StdioProcessSpec::new("python3");
+    spec.args = vec!["-u".to_owned(), "-c".to_owned(), script.to_owned()];
+    spec
+}
+
 async fn spawn_mock_runtime() -> Runtime {
     let cfg = RuntimeConfig::new(python_api_mock_process(), workspace_schema_guard());
     Runtime::spawn_local(cfg).await.expect("spawn runtime")
@@ -723,6 +897,31 @@ async fn spawn_run_prompt_interrupt_probe_runtime() -> Runtime {
         python_run_prompt_interrupt_probe_process(),
         workspace_schema_guard(),
     );
+    Runtime::spawn_local(cfg).await.expect("spawn runtime")
+}
+
+async fn spawn_thread_resume_missing_id_runtime() -> Runtime {
+    let cfg = RuntimeConfig::new(
+        python_thread_resume_missing_id_process(),
+        workspace_schema_guard(),
+    );
+    Runtime::spawn_local(cfg).await.expect("spawn runtime")
+}
+
+async fn spawn_thread_resume_mismatched_id_runtime() -> Runtime {
+    let cfg = RuntimeConfig::new(
+        python_thread_resume_mismatched_id_process(),
+        workspace_schema_guard(),
+    );
+    Runtime::spawn_local(cfg).await.expect("spawn runtime")
+}
+
+async fn spawn_run_prompt_lagged_completion_runtime() -> Runtime {
+    let mut cfg = RuntimeConfig::new(
+        python_run_prompt_lagged_completion_process(),
+        workspace_schema_guard(),
+    );
+    cfg.live_channel_capacity = 1;
     Runtime::spawn_local(cfg).await.expect("spawn runtime")
 }
 
@@ -867,6 +1066,7 @@ fn maps_turn_start_params_to_wire_shape() {
             writable_roots: vec!["/tmp".to_owned()],
             network_access: false,
         })),
+        privileged_escalation_approved: true,
         model: Some("gpt-5".to_owned()),
         effort: Some(ReasoningEffort::High),
         summary: Some("brief".to_owned()),
@@ -1041,6 +1241,7 @@ fn prompt_run_params_defaults_are_explicit() {
         params.sandbox_policy,
         SandboxPolicy::Preset(SandboxPreset::ReadOnly)
     );
+    assert!(!params.privileged_escalation_approved);
     assert_eq!(params.timeout, Duration::from_secs(120));
     assert!(params.attachments.is_empty());
 }
@@ -1055,6 +1256,7 @@ fn prompt_run_params_builder_overrides_defaults() {
             writable_roots: vec!["/work".to_owned()],
             network_access: false,
         }))
+        .allow_privileged_escalation()
         .attach_path("README.md")
         .attach_path_with_placeholder("Docs/CORE_API.md", "core-doc")
         .attach_image_url("https://example.com/a.png")
@@ -1074,6 +1276,7 @@ fn prompt_run_params_builder_overrides_defaults() {
             network_access: false,
         })
     );
+    assert!(params.privileged_escalation_approved);
     assert_eq!(params.timeout, Duration::from_secs(30));
     assert_eq!(params.attachments.len(), 5);
     assert!(matches!(
@@ -1114,6 +1317,7 @@ fn maps_thread_start_params_to_wire_shape() {
         cwd: Some("/work".to_owned()),
         approval_policy: Some(ApprovalPolicy::OnRequest),
         sandbox_policy: Some(SandboxPolicy::Preset(SandboxPreset::ReadOnly)),
+        privileged_escalation_approved: false,
     };
 
     let wire = thread_start_params_to_wire(&params);
@@ -1173,6 +1377,136 @@ async fn typed_thread_and_turn_roundtrip() {
 
     let forked = runtime.thread_fork("thr_old").await.expect("thread fork");
     assert_eq!(forked.thread_id, "thr_forked");
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn thread_start_rejects_privileged_sandbox_without_explicit_opt_in() {
+    let runtime = spawn_mock_runtime().await;
+
+    let err = runtime
+        .thread_start(ThreadStartParams {
+            cwd: Some("/tmp".to_owned()),
+            approval_policy: Some(ApprovalPolicy::OnRequest),
+            sandbox_policy: Some(SandboxPolicy::Preset(SandboxPreset::DangerFullAccess)),
+            privileged_escalation_approved: false,
+            ..ThreadStartParams::default()
+        })
+        .await
+        .expect_err("must reject privileged sandbox without explicit opt-in");
+    assert!(matches!(err, crate::errors::RpcError::InvalidRequest(_)));
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn thread_start_rejects_privileged_sandbox_without_non_never_approval() {
+    let runtime = spawn_mock_runtime().await;
+
+    let err = runtime
+        .thread_start(ThreadStartParams {
+            cwd: Some("/tmp".to_owned()),
+            approval_policy: Some(ApprovalPolicy::Never),
+            sandbox_policy: Some(SandboxPolicy::Preset(SandboxPreset::DangerFullAccess)),
+            privileged_escalation_approved: true,
+            ..ThreadStartParams::default()
+        })
+        .await
+        .expect_err("must reject privileged sandbox with never approval");
+    assert!(matches!(err, crate::errors::RpcError::InvalidRequest(_)));
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn thread_start_rejects_privileged_sandbox_without_scope() {
+    let runtime = spawn_mock_runtime().await;
+
+    let err = runtime
+        .thread_start(ThreadStartParams {
+            cwd: None,
+            approval_policy: Some(ApprovalPolicy::OnRequest),
+            sandbox_policy: Some(SandboxPolicy::Preset(SandboxPreset::DangerFullAccess)),
+            privileged_escalation_approved: true,
+            ..ThreadStartParams::default()
+        })
+        .await
+        .expect_err("must reject privileged sandbox without explicit scope");
+    assert!(matches!(err, crate::errors::RpcError::InvalidRequest(_)));
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn turn_start_rejects_privileged_sandbox_without_explicit_opt_in() {
+    let runtime = spawn_mock_runtime().await;
+    let thread = runtime
+        .thread_start(ThreadStartParams {
+            approval_policy: Some(ApprovalPolicy::Never),
+            sandbox_policy: Some(SandboxPolicy::Preset(SandboxPreset::ReadOnly)),
+            ..ThreadStartParams::default()
+        })
+        .await
+        .expect("thread start");
+
+    let err = thread
+        .turn_start(TurnStartParams {
+            input: vec![InputItem::Text {
+                text: "hi".to_owned(),
+            }],
+            cwd: Some("/tmp".to_owned()),
+            approval_policy: Some(ApprovalPolicy::OnRequest),
+            sandbox_policy: Some(SandboxPolicy::Preset(SandboxPreset::WorkspaceWrite {
+                writable_roots: vec!["/tmp".to_owned()],
+                network_access: false,
+            })),
+            privileged_escalation_approved: false,
+            ..TurnStartParams::default()
+        })
+        .await
+        .expect_err("must reject privileged turn without explicit opt-in");
+    assert!(matches!(err, crate::errors::RpcError::InvalidRequest(_)));
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn thread_resume_requires_thread_id_in_response() {
+    let runtime = spawn_thread_resume_missing_id_runtime().await;
+
+    let err = runtime
+        .thread_resume("thr_missing", ThreadStartParams::default())
+        .await
+        .expect_err("thread resume must fail without thread id in response");
+
+    match err {
+        RpcError::InvalidRequest(message) => {
+            assert!(message.contains("thread/resume missing thread id in result"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn thread_resume_requires_matching_thread_id() {
+    let runtime = spawn_thread_resume_mismatched_id_runtime().await;
+
+    let err = runtime
+        .thread_resume("thr_expected", ThreadStartParams::default())
+        .await
+        .expect_err("thread resume must fail on mismatched thread id in response");
+
+    match err {
+        RpcError::InvalidRequest(message) => {
+            assert!(message.contains("thread/resume returned mismatched thread id"));
+            assert!(message.contains("requested=thr_expected"));
+            assert!(message.contains("actual=thr_unexpected"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 
     runtime.shutdown().await.expect("shutdown");
 }
@@ -1311,6 +1645,7 @@ async fn run_prompt_returns_assistant_text() {
             effort: Some(ReasoningEffort::High),
             approval_policy: ApprovalPolicy::Never,
             sandbox_policy: SandboxPolicy::Preset(SandboxPreset::ReadOnly),
+            privileged_escalation_approved: false,
             attachments: vec![],
             timeout: Duration::from_secs(2),
         })
@@ -1690,6 +2025,7 @@ async fn run_prompt_preserves_explicit_effort() {
             effort: Some(ReasoningEffort::High),
             approval_policy: ApprovalPolicy::Never,
             sandbox_policy: SandboxPolicy::Preset(SandboxPreset::ReadOnly),
+            privileged_escalation_approved: false,
             attachments: vec![],
             timeout: Duration::from_secs(2),
         })
@@ -1712,6 +2048,7 @@ async fn run_prompt_surfaces_turn_error_when_text_is_empty() {
             effort: Some(ReasoningEffort::High),
             approval_policy: ApprovalPolicy::Never,
             sandbox_policy: SandboxPolicy::Preset(SandboxPreset::ReadOnly),
+            privileged_escalation_approved: false,
             attachments: vec![],
             timeout: Duration::from_secs(2),
         })
@@ -1745,6 +2082,7 @@ async fn run_prompt_surfaces_turn_failed_with_context() {
             effort: Some(ReasoningEffort::High),
             approval_policy: ApprovalPolicy::Never,
             sandbox_policy: SandboxPolicy::Preset(SandboxPreset::ReadOnly),
+            privileged_escalation_approved: false,
             attachments: vec![],
             timeout: Duration::from_secs(2),
         })
@@ -1781,6 +2119,22 @@ async fn run_prompt_timeout_uses_absolute_deadline_under_streaming_deltas() {
         "run_prompt exceeded expected absolute timeout window: {:?}",
         started.elapsed()
     );
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_prompt_recovers_when_live_stream_lags_past_terminal_event() {
+    let runtime = spawn_run_prompt_lagged_completion_runtime().await;
+
+    let result = runtime
+        .run_prompt(PromptRunParams::new("/tmp", "lagged completion probe"))
+        .await
+        .expect("run prompt should recover from lagged stream");
+
+    assert_eq!(result.thread_id, "thr_lagged");
+    assert_eq!(result.turn_id, "turn_lagged");
+    assert_eq!(result.assistant_text, "ok-from-thread-read");
 
     runtime.shutdown().await.expect("shutdown");
 }

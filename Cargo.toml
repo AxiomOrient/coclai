@@ -22,3 +22,4 @@ hex = "0.4"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", "io-util", "fs"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+arc-swap = "1"

@@ -224,6 +224,98 @@ for line in sys.stdin:
     spec
 }
 
+fn resume_missing_id_runtime_process() -> StdioProcessSpec {
+    let script = r###"
+import json
+import sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    rpc_id = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {}
+
+    if rpc_id is None:
+        continue
+
+    if method == "initialize":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ready": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/start":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": "thr_art_new"}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/resume":
+        # Deliberately omit any thread id field to validate strict client contract handling.
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True, "echoMethod": method, "params": params}}) + "\n")
+    sys.stdout.flush()
+"###;
+
+    let mut spec = StdioProcessSpec::new("python3");
+    spec.args = vec!["-u".to_owned(), "-c".to_owned(), script.to_owned()];
+    spec
+}
+
+fn resume_mismatched_id_runtime_process() -> StdioProcessSpec {
+    let script = r###"
+import json
+import sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    rpc_id = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {}
+
+    if rpc_id is None:
+        continue
+
+    if method == "initialize":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ready": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/start":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": "thr_art_new"}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/resume":
+        # Deliberately return a different id to validate strict resume contract handling.
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": "thr_unexpected"}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True, "echoMethod": method, "params": params}}) + "\n")
+    sys.stdout.flush()
+"###;
+
+    let mut spec = StdioProcessSpec::new("python3");
+    spec.args = vec!["-u".to_owned(), "-c".to_owned(), script.to_owned()];
+    spec
+}
+
 async fn spawn_mock_runtime() -> Runtime {
     let cfg = RuntimeConfig::new(mock_runtime_process(), workspace_schema_guard());
     Runtime::spawn_local(cfg).await.expect("runtime spawn")
@@ -232,6 +324,22 @@ async fn spawn_mock_runtime() -> Runtime {
 async fn spawn_interrupt_probe_runtime(interrupt_mark: &str) -> Runtime {
     let cfg = RuntimeConfig::new(
         interrupt_probe_runtime_process(interrupt_mark),
+        workspace_schema_guard(),
+    );
+    Runtime::spawn_local(cfg).await.expect("runtime spawn")
+}
+
+async fn spawn_resume_missing_id_runtime() -> Runtime {
+    let cfg = RuntimeConfig::new(
+        resume_missing_id_runtime_process(),
+        workspace_schema_guard(),
+    );
+    Runtime::spawn_local(cfg).await.expect("runtime spawn")
+}
+
+async fn spawn_resume_mismatched_id_runtime() -> Runtime {
+    let cfg = RuntimeConfig::new(
+        resume_mismatched_id_runtime_process(),
         workspace_schema_guard(),
     );
     Runtime::spawn_local(cfg).await.expect("runtime spawn")
@@ -558,6 +666,70 @@ async fn open_accepts_compatible_minor_contract_version() {
 
     assert_eq!(session.thread_id, "thr_contract_minor");
     assert_eq!(session.artifact_id, "doc:contract-minor");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn open_fails_when_resume_response_missing_thread_id() {
+    let temp = TempDir::new("coclai_artifact_resume_missing_id");
+    let store: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(&temp.root));
+    seed_artifact(store.as_ref(), "doc:resume-missing", "seed\n");
+
+    let mut meta = store
+        .get_meta("doc:resume-missing")
+        .expect("seed meta must exist");
+    meta.runtime_thread_id = Some("thr_existing".to_owned());
+    store
+        .set_meta("doc:resume-missing", meta)
+        .expect("set runtime thread id");
+
+    let runtime = spawn_resume_missing_id_runtime().await;
+    let manager = ArtifactSessionManager::new(runtime.clone(), Arc::clone(&store));
+    let err = manager
+        .open("doc:resume-missing")
+        .await
+        .expect_err("open must fail on invalid resume response");
+
+    match err {
+        DomainError::Parse(message) => {
+            assert!(message.contains("thread/resume missing thread id in result"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn open_fails_when_resume_response_thread_id_mismatches_request() {
+    let temp = TempDir::new("coclai_artifact_resume_mismatched_id");
+    let store: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(&temp.root));
+    seed_artifact(store.as_ref(), "doc:resume-mismatch", "seed\n");
+
+    let mut meta = store
+        .get_meta("doc:resume-mismatch")
+        .expect("seed meta must exist");
+    meta.runtime_thread_id = Some("thr_existing".to_owned());
+    store
+        .set_meta("doc:resume-mismatch", meta)
+        .expect("set runtime thread id");
+
+    let runtime = spawn_resume_mismatched_id_runtime().await;
+    let manager = ArtifactSessionManager::new(runtime.clone(), Arc::clone(&store));
+    let err = manager
+        .open("doc:resume-mismatch")
+        .await
+        .expect_err("open must fail on mismatched resume thread id");
+
+    match err {
+        DomainError::Parse(message) => {
+            assert!(message.contains("thread/resume returned mismatched thread id"));
+            assert!(message.contains("requested=thr_existing"));
+            assert!(message.contains("actual=thr_unexpected"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    runtime.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "current_thread")]

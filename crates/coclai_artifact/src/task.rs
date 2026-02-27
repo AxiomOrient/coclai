@@ -276,7 +276,18 @@ pub(crate) async fn resume_thread(
     let result = runtime
         .call_raw("thread/resume", json!({ "threadId": thread_id }))
         .await?;
-    Ok(parse_thread_id(&result).unwrap_or_else(|| thread_id.to_owned()))
+    let resumed = parse_thread_id(&result).ok_or_else(|| {
+        DomainError::Parse(format!(
+            "thread/resume missing thread id in result: {}",
+            result
+        ))
+    })?;
+    if resumed != thread_id {
+        return Err(DomainError::Parse(format!(
+            "thread/resume returned mismatched thread id: requested={thread_id} actual={resumed}"
+        )));
+    }
+    Ok(resumed)
 }
 
 /// Build deterministic domain prompt text.

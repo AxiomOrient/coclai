@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::time::{sleep, timeout};
@@ -459,7 +460,6 @@ async fn spawn_runtime_with_supervisor(
     let mut cfg = RuntimeConfig::new(process, workspace_schema_guard());
     cfg.supervisor = SupervisorConfig {
         restart,
-        monitor_poll_ms: 10,
         shutdown_flush_timeout_ms: 200,
         shutdown_terminate_grace_ms: 200,
     };
@@ -736,6 +736,56 @@ async fn notify_validated_rejects_invalid_known_method_params() {
         .await
         .expect_err("missing turnId must fail");
     assert!(matches!(err, RuntimeError::InvalidConfig(_)));
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[derive(Debug, Serialize)]
+struct TurnInterruptNotifyMissingTurnId {
+    #[serde(rename = "threadId")]
+    thread_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TurnInterruptNotifyParams {
+    #[serde(rename = "threadId")]
+    thread_id: String,
+    #[serde(rename = "turnId")]
+    turn_id: String,
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn notify_typed_validated_rejects_invalid_known_method_params() {
+    let runtime = spawn_mock_runtime().await;
+
+    let err = runtime
+        .notify_typed_validated(
+            "turn/interrupt",
+            TurnInterruptNotifyMissingTurnId {
+                thread_id: "thr_only".to_owned(),
+            },
+        )
+        .await
+        .expect_err("missing turnId must fail");
+    assert!(matches!(err, RuntimeError::InvalidConfig(_)));
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn notify_typed_validated_accepts_valid_known_method_params() {
+    let runtime = spawn_mock_runtime().await;
+
+    runtime
+        .notify_typed_validated(
+            "turn/interrupt",
+            TurnInterruptNotifyParams {
+                thread_id: "thr_1".to_owned(),
+                turn_id: "turn_1".to_owned(),
+            },
+        )
+        .await
+        .expect("valid turn/interrupt payload");
 
     runtime.shutdown().await.expect("shutdown");
 }

@@ -22,9 +22,11 @@ impl WorkflowConfig {
     /// Create config with safe defaults:
     /// - runtime discovery via `ClientConfig::new()`
     /// - model unset, effort medium, approval never, sandbox read-only
+    /// - cwd normalized to absolute path without filesystem existence checks
     pub fn new(cwd: impl Into<String>) -> Self {
+        let normalized_cwd = absolutize_cwd_without_fs_checks(&cwd.into());
         Self {
-            cwd: cwd.into(),
+            cwd: normalized_cwd,
             client_config: ClientConfig::new(),
             run_profile: RunProfile::new(),
         }
@@ -314,11 +316,25 @@ fn fold_quick_run(
     }
 }
 
+fn absolutize_cwd_without_fs_checks(cwd: &str) -> String {
+    let path = PathBuf::from(cwd);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        match std::env::current_dir() {
+            Ok(current) => current.join(path),
+            Err(_) => path,
+        }
+    };
+    absolute.to_string_lossy().into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use coclai_runtime::{HookAction, HookContext, HookIssue, HookPatch, HookPhase};
     use std::future::Future;
+    use std::path::PathBuf;
     use std::pin::Pin;
 
     struct TestPreHook;
@@ -453,5 +469,35 @@ mod tests {
                 shutdown: Some(RuntimeError::Internal("shutdown".to_owned())),
             })
         );
+    }
+
+    #[test]
+    fn workflow_config_new_makes_relative_path_absolute_without_fs_checks() {
+        let relative = format!(
+            "coclai_nonexistent_{}_segment",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos()
+        );
+        let cfg = WorkflowConfig::new(relative.clone());
+
+        let expected = std::env::current_dir()
+            .expect("cwd")
+            .join(PathBuf::from(relative));
+        assert_eq!(PathBuf::from(cfg.cwd), expected);
+    }
+
+    #[test]
+    fn workflow_config_new_keeps_absolute_path_stable() {
+        let absolute = std::env::temp_dir().join(format!(
+            "coclai_abs_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos()
+        ));
+        let cfg = WorkflowConfig::new(absolute.to_string_lossy().to_string());
+        assert_eq!(PathBuf::from(cfg.cwd), absolute);
     }
 }

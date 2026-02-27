@@ -10,7 +10,7 @@ use crate::approvals::{route_server_request, ServerRequest, ServerRequestRoute, 
 use crate::errors::RuntimeError;
 use crate::events::{Direction, Envelope, JsonRpcId, MsgKind};
 use crate::metrics::RuntimeMetrics;
-use crate::rpc::{classify_message, extract_ids, map_rpc_error};
+use crate::rpc::{extract_message_metadata, map_rpc_error};
 use crate::sink::EventSink;
 
 use super::rpc_io::resolve_transport_closed_pending;
@@ -32,15 +32,10 @@ pub(super) async fn dispatcher_loop(inner: Arc<RuntimeInner>, mut read_rx: mpsc:
                     break;
                 };
         inner.metrics.record_ingress();
-        let kind = classify_message(&json);
-        let response_id = parse_response_rpc_id(&json);
-        let envelope_rpc_id = parse_jsonrpc_id(&json);
-        let request_id = envelope_rpc_id.clone();
-        let method = json
-            .get("method")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-        let ids = extract_ids(&json);
+        let metadata = extract_message_metadata(&json);
+        let kind = metadata.kind;
+        let response_id = metadata.response_id;
+        let request_id = metadata.rpc_id.clone();
 
         match kind {
             MsgKind::Response => {
@@ -51,18 +46,18 @@ pub(super) async fn dispatcher_loop(inner: Arc<RuntimeInner>, mut read_rx: mpsc:
                         Ok(json.get("result").cloned().unwrap_or(Value::Null))
                     };
 
-                    if let Some(tx) = inner.pending.lock().await.remove(&id) {
+                    if let Some(tx) = inner.io.pending.lock().await.remove(&id) {
                         inner.metrics.dec_pending_rpc();
                         let _ = tx.send(response);
                     }
                 }
             }
             MsgKind::ServerRequest => {
-                if let (Some(id), Some(method)) = (request_id, method.as_deref()) {
+                if let (Some(id), Some(method)) = (request_id, metadata.method.as_deref()) {
                     let params = json.get("params").cloned().unwrap_or(Value::Null);
                     match route_server_request(
                         method,
-                        inner.server_request_cfg.auto_decline_unknown,
+                        inner.spec.server_request_cfg.auto_decline_unknown,
                     ) {
                         ServerRequestRoute::AutoDecline => {
                             let _ = respond_with_timeout_policy(&inner, &id, method).await;
@@ -70,9 +65,10 @@ pub(super) async fn dispatcher_loop(inner: Arc<RuntimeInner>, mut read_rx: mpsc:
                         ServerRequestRoute::Queue => {
                             let approval_id = Uuid::new_v4().to_string();
                             let now = now_millis();
-                            let deadline = now + inner.server_request_cfg.default_timeout_ms as i64;
+                            let deadline =
+                                now + inner.spec.server_request_cfg.default_timeout_ms as i64;
                             let rpc_key = jsonrpc_state_key(&id);
-                            inner.pending_server_requests.lock().await.insert(
+                            inner.io.pending_server_requests.lock().await.insert(
                                 approval_id.clone(),
                                 PendingServerRequestEntry {
                                     rpc_id: id,
@@ -99,10 +95,11 @@ pub(super) async fn dispatcher_loop(inner: Arc<RuntimeInner>, mut read_rx: mpsc:
                                 method: method.to_owned(),
                                 params: params.clone(),
                             };
-                            if inner.server_request_tx.send(req).await.is_err() {
+                            if inner.io.server_request_tx.send(req).await.is_err() {
                                 // Approval queue is unavailable: resolve immediately using
                                 // timeout policy so pending maps do not grow until timer expiry.
                                 let pending = inner
+                                    .io
                                     .pending_server_requests
                                     .lock()
                                     .await
@@ -126,22 +123,22 @@ pub(super) async fn dispatcher_loop(inner: Arc<RuntimeInner>, mut read_rx: mpsc:
             MsgKind::Notification | MsgKind::Unknown => {}
         }
 
-        let seq = inner.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let seq = inner.counters.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let envelope = Envelope {
             seq,
             ts_millis: now_millis(),
             direction: Direction::Inbound,
             kind,
-            rpc_id: envelope_rpc_id,
-            method,
-            thread_id: ids.thread_id,
-            turn_id: ids.turn_id,
-            item_id: ids.item_id,
+            rpc_id: metadata.rpc_id,
+            method: metadata.method,
+            thread_id: metadata.thread_id,
+            turn_id: metadata.turn_id,
+            item_id: metadata.item_id,
             json,
         };
         state_apply_envelope(&inner, &envelope);
         route_event_sink(&inner, &envelope);
-        if inner.live_tx.send(envelope).is_err() {
+        if inner.io.live_tx.send(envelope).is_err() {
             inner.metrics.record_broadcast_send_failed();
         }
             }
@@ -152,12 +149,13 @@ pub(super) async fn dispatcher_loop(inner: Arc<RuntimeInner>, mut read_rx: mpsc:
     }
 
     resolve_transport_closed_pending(&inner).await;
+    inner.io.transport_closed_signal.notify_one();
 }
 
 async fn expire_pending_server_requests(inner: &Arc<RuntimeInner>) {
     let now = now_millis();
     let expired: Vec<PendingServerRequestEntry> = {
-        let mut pending = inner.pending_server_requests.lock().await;
+        let mut pending = inner.io.pending_server_requests.lock().await;
         let mut expired = Vec::new();
         pending.retain(|_, entry| {
             if entry.deadline_millis <= now {
@@ -181,7 +179,7 @@ async fn expire_pending_server_requests(inner: &Arc<RuntimeInner>) {
 /// Allocation: one `Envelope` clone only when sink is configured.
 /// Complexity: O(1).
 fn route_event_sink(inner: &Arc<RuntimeInner>, envelope: &Envelope) {
-    let Some(tx) = inner.event_sink_tx.as_ref() else {
+    let Some(tx) = inner.io.event_sink_tx.as_ref() else {
         return;
     };
 
@@ -242,7 +240,7 @@ async fn respond_with_timeout_policy(
         return send_timeout_error(inner, rpc_id, method).await;
     }
 
-    match inner.server_request_cfg.on_timeout {
+    match inner.spec.server_request_cfg.on_timeout {
         TimeoutAction::Decline => {
             send_rpc_result(inner, rpc_id, timeout_result_payload(method, false)).await
         }
@@ -363,10 +361,9 @@ pub(super) async fn send_rpc_result(
     result: Value,
 ) -> Result<(), RuntimeError> {
     let outbound_tx = inner
+        .io
         .outbound_tx
-        .lock()
-        .await
-        .clone()
+        .load_full()
         .ok_or(RuntimeError::TransportClosed)?;
 
     let mut message = Map::<String, Value>::new();
@@ -384,10 +381,9 @@ pub(super) async fn send_rpc_error(
     error: Value,
 ) -> Result<(), RuntimeError> {
     let outbound_tx = inner
+        .io
         .outbound_tx
-        .lock()
-        .await
-        .clone()
+        .load_full()
         .ok_or(RuntimeError::TransportClosed)?;
 
     let mut message = Map::<String, Value>::new();
@@ -410,21 +406,5 @@ fn jsonrpc_state_key(id: &JsonRpcId) -> String {
     match id {
         JsonRpcId::Number(v) => format!("n:{v}"),
         JsonRpcId::Text(v) => format!("s:{v}"),
-    }
-}
-
-fn parse_response_rpc_id(json: &Value) -> Option<u64> {
-    match json.get("id") {
-        Some(Value::Number(number)) => number.as_u64(),
-        Some(Value::String(text)) => text.parse::<u64>().ok(),
-        _ => None,
-    }
-}
-
-fn parse_jsonrpc_id(json: &Value) -> Option<JsonRpcId> {
-    match json.get("id") {
-        Some(Value::Number(number)) => number.as_u64().map(JsonRpcId::Number),
-        Some(Value::String(text)) => Some(JsonRpcId::Text(text.clone())),
-        _ => None,
     }
 }

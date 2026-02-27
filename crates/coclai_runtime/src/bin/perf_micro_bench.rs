@@ -72,25 +72,32 @@ struct MicroBenchReport {
 type AsyncBenchFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 fn main() {
-    let cfg = parse_args();
-    let report = run_micro_bench(cfg.iterations, cfg.warmup);
+    if let Err(err) = run() {
+        eprintln!("{err}");
+        std::process::exit(2);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let cfg = parse_args()?;
+    let report = run_micro_bench(cfg.iterations, cfg.warmup)?;
 
     if let Some(parent) = cfg.out.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
-                .unwrap_or_else(|err| panic!("failed to create {:?}: {err}", parent));
+                .map_err(|err| format!("failed to create {:?}: {err}", parent))?;
         }
     }
     let serialized = serde_json::to_string_pretty(&report)
-        .unwrap_or_else(|err| panic!("failed to serialize report: {err}"));
+        .map_err(|err| format!("failed to serialize report: {err}"))?;
     fs::write(&cfg.out, serialized)
-        .unwrap_or_else(|err| panic!("failed to write {:?}: {err}", cfg.out));
+        .map_err(|err| format!("failed to write {:?}: {err}", cfg.out))?;
 
     if let Some(baseline_path) = cfg.baseline.as_ref() {
         let baseline_raw = fs::read_to_string(baseline_path)
-            .unwrap_or_else(|err| panic!("failed to read baseline {:?}: {err}", baseline_path));
+            .map_err(|err| format!("failed to read baseline {:?}: {err}", baseline_path))?;
         let baseline: MicroBenchReport = serde_json::from_str(&baseline_raw)
-            .unwrap_or_else(|err| panic!("invalid baseline JSON {:?}: {err}", baseline_path));
+            .map_err(|err| format!("invalid baseline JSON {:?}: {err}", baseline_path))?;
         let mut findings = regression_findings(&report, &baseline, cfg.max_regression);
         findings.extend(linearity_findings(&report, cfg.max_hook_linearity));
         if findings.is_empty() {
@@ -103,7 +110,7 @@ fn main() {
             for finding in &findings {
                 eprintln!("{finding}");
             }
-            panic!("perf regression check failed");
+            return Err("perf regression check failed".to_owned());
         }
     } else {
         let findings = linearity_findings(&report, cfg.max_hook_linearity);
@@ -116,7 +123,7 @@ fn main() {
             for finding in &findings {
                 eprintln!("{finding}");
             }
-            panic!("hook linearity check failed");
+            return Err("hook linearity check failed".to_owned());
         }
     }
 
@@ -126,9 +133,10 @@ fn main() {
         report.adapter_overhead.dyn_p95_nanos,
         report.adapter_overhead.p95_overhead_ratio * 100.0
     );
+    Ok(())
 }
 
-fn parse_args() -> CliConfig {
+fn parse_args() -> Result<CliConfig, String> {
     let mut out = PathBuf::from("target/perf/micro_latest.json");
     let mut baseline: Option<PathBuf> = None;
     let mut max_regression = 0.15f64;
@@ -141,47 +149,47 @@ fn parse_args() -> CliConfig {
         match arg.as_str() {
             "--out" => {
                 let Some(value) = args.next() else {
-                    panic!("--out requires a value");
+                    return Err("--out requires a value".to_owned());
                 };
                 out = PathBuf::from(value);
             }
             "--baseline" => {
                 let Some(value) = args.next() else {
-                    panic!("--baseline requires a value");
+                    return Err("--baseline requires a value".to_owned());
                 };
                 baseline = Some(PathBuf::from(value));
             }
             "--max-regression" => {
                 let Some(value) = args.next() else {
-                    panic!("--max-regression requires a value");
+                    return Err("--max-regression requires a value".to_owned());
                 };
                 max_regression = value
                     .parse::<f64>()
-                    .unwrap_or_else(|err| panic!("invalid --max-regression value: {err}"));
+                    .map_err(|err| format!("invalid --max-regression value: {err}"))?;
             }
             "--max-hook-linearity" => {
                 let Some(value) = args.next() else {
-                    panic!("--max-hook-linearity requires a value");
+                    return Err("--max-hook-linearity requires a value".to_owned());
                 };
                 max_hook_linearity = value
                     .parse::<f64>()
-                    .unwrap_or_else(|err| panic!("invalid --max-hook-linearity value: {err}"));
+                    .map_err(|err| format!("invalid --max-hook-linearity value: {err}"))?;
             }
             "--iterations" => {
                 let Some(value) = args.next() else {
-                    panic!("--iterations requires a value");
+                    return Err("--iterations requires a value".to_owned());
                 };
                 iterations = value
                     .parse::<u64>()
-                    .unwrap_or_else(|err| panic!("invalid --iterations value: {err}"));
+                    .map_err(|err| format!("invalid --iterations value: {err}"))?;
             }
             "--warmup" => {
                 let Some(value) = args.next() else {
-                    panic!("--warmup requires a value");
+                    return Err("--warmup requires a value".to_owned());
                 };
                 warmup = value
                     .parse::<u64>()
-                    .unwrap_or_else(|err| panic!("invalid --warmup value: {err}"));
+                    .map_err(|err| format!("invalid --warmup value: {err}"))?;
             }
             "--help" | "-h" => {
                 println!(
@@ -189,21 +197,21 @@ fn parse_args() -> CliConfig {
                 );
                 std::process::exit(0);
             }
-            other => panic!("unknown argument: {other}"),
+            other => return Err(format!("unknown argument: {other}")),
         }
     }
 
-    CliConfig {
+    Ok(CliConfig {
         out,
         baseline,
         max_regression,
         max_hook_linearity,
         iterations,
         warmup,
-    }
+    })
 }
 
-fn run_micro_bench(iterations: u64, warmup: u64) -> MicroBenchReport {
+fn run_micro_bench(iterations: u64, warmup: u64) -> Result<MicroBenchReport, String> {
     let classify_inputs = classify_inputs();
     let classify_message_report = run_workload("classify_message", iterations, warmup, |i| {
         let value = &classify_inputs[i % classify_inputs.len()];
@@ -245,28 +253,28 @@ fn run_micro_bench(iterations: u64, warmup: u64) -> MicroBenchReport {
         warmup,
         Arc::clone(&hook_ctx),
         Arc::clone(&hooks_h0),
-    );
+    )?;
     let hook_pre_h1 = run_hook_workload(
         "hook_pre_h1",
         iterations,
         warmup,
         Arc::clone(&hook_ctx),
         Arc::clone(&hooks_h1),
-    );
+    )?;
     let hook_pre_h3 = run_hook_workload(
         "hook_pre_h3",
         iterations,
         warmup,
         Arc::clone(&hook_ctx),
         Arc::clone(&hooks_h3),
-    );
+    )?;
     let hook_pre_h5 = run_hook_workload(
         "hook_pre_h5",
         iterations,
         warmup,
         Arc::clone(&hook_ctx),
         Arc::clone(&hooks_h5),
-    );
+    )?;
 
     let direct_adapter = BenchDirectAdapter;
     let dyn_adapter = BenchDynAdapter;
@@ -283,7 +291,7 @@ fn run_micro_bench(iterations: u64, warmup: u64) -> MicroBenchReport {
 
     let adapter_overhead = build_adapter_overhead_report(&adapter_direct_sync, &adapter_dyn_sync);
 
-    MicroBenchReport {
+    Ok(MicroBenchReport {
         generated_at_unix_millis: now_unix_millis(),
         iterations,
         warmup,
@@ -297,7 +305,7 @@ fn run_micro_bench(iterations: u64, warmup: u64) -> MicroBenchReport {
         adapter_direct_sync,
         adapter_dyn_sync,
         adapter_overhead,
-    }
+    })
 }
 
 fn run_hook_workload(
@@ -306,7 +314,7 @@ fn run_hook_workload(
     warmup: u64,
     ctx: Arc<HookContext>,
     hooks: Arc<Vec<Arc<dyn PreHook>>>,
-) -> WorkloadReport {
+) -> Result<WorkloadReport, String> {
     run_workload_async(name, iterations, warmup, move |_| {
         let ctx = Arc::clone(&ctx);
         let hooks = Arc::clone(&hooks);
@@ -345,11 +353,11 @@ fn run_workload_async(
     iterations: u64,
     warmup: u64,
     mut f: impl FnMut(usize) -> AsyncBenchFuture,
-) -> WorkloadReport {
+) -> Result<WorkloadReport, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
-        .unwrap_or_else(|err| panic!("failed to build async benchmark runtime: {err}"));
-    runtime.block_on(async move {
+        .map_err(|err| format!("failed to build async benchmark runtime: {err}"))?;
+    Ok(runtime.block_on(async move {
         for i in 0..warmup {
             f(i as usize).await;
         }
@@ -362,7 +370,7 @@ fn run_workload_async(
         }
 
         finalize_workload_report(name, iterations, elapsed_nanos)
-    })
+    }))
 }
 
 fn run_workload(

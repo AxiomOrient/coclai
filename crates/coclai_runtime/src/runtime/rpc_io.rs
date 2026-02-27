@@ -17,15 +17,14 @@ pub(super) async fn call_raw_inner(
     timeout_duration: Duration,
 ) -> Result<Value, RpcError> {
     let outbound_tx = inner
+        .io
         .outbound_tx
-        .lock()
-        .await
-        .clone()
+        .load_full()
         .ok_or(RpcError::TransportClosed)?;
 
-    let rpc_id = inner.next_rpc_id.fetch_add(1, Ordering::Relaxed);
+    let rpc_id = inner.counters.next_rpc_id.fetch_add(1, Ordering::Relaxed);
     let (pending_tx, pending_rx) = oneshot::channel();
-    inner.pending.lock().await.insert(rpc_id, pending_tx);
+    inner.io.pending.lock().await.insert(rpc_id, pending_tx);
     inner.metrics.inc_pending_rpc();
 
     let request = json!({
@@ -34,7 +33,7 @@ pub(super) async fn call_raw_inner(
         "params": params
     });
     if outbound_tx.send(request).await.is_err() {
-        if inner.pending.lock().await.remove(&rpc_id).is_some() {
+        if inner.io.pending.lock().await.remove(&rpc_id).is_some() {
             inner.metrics.dec_pending_rpc();
         }
         return Err(RpcError::TransportClosed);
@@ -44,7 +43,7 @@ pub(super) async fn call_raw_inner(
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err(RpcError::TransportClosed),
         Err(_) => {
-            if inner.pending.lock().await.remove(&rpc_id).is_some() {
+            if inner.io.pending.lock().await.remove(&rpc_id).is_some() {
                 inner.metrics.dec_pending_rpc();
             }
             Err(RpcError::Timeout)
@@ -58,10 +57,9 @@ pub(super) async fn notify_raw_inner(
     params: Value,
 ) -> Result<(), RuntimeError> {
     let outbound_tx = inner
+        .io
         .outbound_tx
-        .lock()
-        .await
-        .clone()
+        .load_full()
         .ok_or(RuntimeError::TransportClosed)?;
 
     let notification = json!({
@@ -75,14 +73,14 @@ pub(super) async fn notify_raw_inner(
 }
 
 pub(super) async fn resolve_transport_closed_pending(inner: &Arc<RuntimeInner>) {
-    let mut pending = inner.pending.lock().await;
+    let mut pending = inner.io.pending.lock().await;
     for (_, tx) in pending.drain() {
         let _ = tx.send(Err(RpcError::TransportClosed));
     }
     drop(pending);
     inner.metrics.set_pending_rpc_count(0);
 
-    inner.pending_server_requests.lock().await.clear();
+    inner.io.pending_server_requests.lock().await.clear();
     inner.metrics.set_pending_server_request_count(0);
     state_clear_pending_server_requests(inner);
 }

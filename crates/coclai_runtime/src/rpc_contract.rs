@@ -3,6 +3,33 @@ use serde_json::Value;
 use crate::errors::RpcError;
 use crate::turn_output::{parse_thread_id, parse_turn_id};
 
+/// Canonical method catalog shared by facade constants and known-method validation.
+pub mod methods {
+    pub const THREAD_START: &str = "thread/start";
+    pub const THREAD_RESUME: &str = "thread/resume";
+    pub const THREAD_FORK: &str = "thread/fork";
+    pub const THREAD_ARCHIVE: &str = "thread/archive";
+    pub const THREAD_READ: &str = "thread/read";
+    pub const THREAD_LIST: &str = "thread/list";
+    pub const THREAD_LOADED_LIST: &str = "thread/loaded/list";
+    pub const THREAD_ROLLBACK: &str = "thread/rollback";
+    pub const TURN_START: &str = "turn/start";
+    pub const TURN_INTERRUPT: &str = "turn/interrupt";
+
+    pub const KNOWN: [&str; 10] = [
+        THREAD_START,
+        THREAD_RESUME,
+        THREAD_FORK,
+        THREAD_ARCHIVE,
+        THREAD_READ,
+        THREAD_LIST,
+        THREAD_LOADED_LIST,
+        THREAD_ROLLBACK,
+        TURN_START,
+        TURN_INTERRUPT,
+    ];
+}
+
 /// Validation mode for JSON-RPC data integrity checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RpcValidationMode {
@@ -38,11 +65,14 @@ pub fn validate_rpc_request(
     }
 
     match method {
-        "thread/resume" | "thread/fork" | "thread/archive" | "thread/read" | "thread/rollback" => {
-            require_string(params, method, "threadId", "params")
-        }
-        "turn/start" => require_string(params, method, "threadId", "params"),
-        "turn/interrupt" => {
+        methods::THREAD_START => validate_thread_start_request(params, method),
+        methods::THREAD_RESUME
+        | methods::THREAD_FORK
+        | methods::THREAD_ARCHIVE
+        | methods::THREAD_READ
+        | methods::THREAD_ROLLBACK => require_string(params, method, "threadId", "params"),
+        methods::TURN_START => require_string(params, method, "threadId", "params"),
+        methods::TURN_INTERRUPT => {
             require_string(params, method, "threadId", "params")?;
             require_string(params, method, "turnId", "params")
         }
@@ -65,7 +95,11 @@ pub fn validate_rpc_response(
     }
 
     match method {
-        "thread/start" | "thread/resume" | "thread/fork" | "thread/read" | "thread/rollback" => {
+        methods::THREAD_START
+        | methods::THREAD_RESUME
+        | methods::THREAD_FORK
+        | methods::THREAD_READ
+        | methods::THREAD_ROLLBACK => {
             if parse_thread_id(result).is_none() {
                 Err(invalid_response(
                     method,
@@ -76,7 +110,7 @@ pub fn validate_rpc_response(
                 Ok(())
             }
         }
-        "turn/start" => {
+        methods::TURN_START => {
             if parse_turn_id(result).is_none() {
                 Err(invalid_response(
                     method,
@@ -87,7 +121,7 @@ pub fn validate_rpc_response(
                 Ok(())
             }
         }
-        "thread/list" | "thread/loaded/list" => {
+        methods::THREAD_LIST | methods::THREAD_LOADED_LIST => {
             let obj = require_object(result, method, "result")?;
             match obj.get("data") {
                 Some(Value::Array(_)) => Ok(()),
@@ -98,7 +132,7 @@ pub fn validate_rpc_response(
                 )),
             }
         }
-        "thread/archive" | "turn/interrupt" => {
+        methods::THREAD_ARCHIVE | methods::TURN_INTERRUPT => {
             require_object(result, method, "result")?;
             Ok(())
         }
@@ -116,19 +150,7 @@ fn validate_method_name(method: &str) -> Result<(), RpcError> {
 }
 
 fn is_known_method(method: &str) -> bool {
-    matches!(
-        method,
-        "thread/start"
-            | "thread/resume"
-            | "thread/fork"
-            | "thread/archive"
-            | "thread/read"
-            | "thread/list"
-            | "thread/loaded/list"
-            | "thread/rollback"
-            | "turn/start"
-            | "turn/interrupt"
-    )
+    methods::KNOWN.contains(&method)
 }
 
 fn require_object<'a>(
@@ -156,6 +178,32 @@ fn require_string(
             value,
         )),
     }
+}
+
+fn validate_thread_start_request(params: &Value, method: &str) -> Result<(), RpcError> {
+    let obj = require_object(params, method, "params")?;
+
+    // thread/start uses legacy "sandbox" enum string; sandboxPolicy is turn-level.
+    if obj.contains_key("sandboxPolicy") {
+        return Err(invalid_request(
+            method,
+            "params.sandboxPolicy is not valid for thread/start; use params.sandbox",
+            params,
+        ));
+    }
+    if let Some(sandbox) = obj.get("sandbox") {
+        match sandbox.as_str().filter(|value| !value.trim().is_empty()) {
+            Some(_) => {}
+            None => {
+                return Err(invalid_request(
+                    method,
+                    "params.sandbox must be a non-empty string when provided",
+                    params,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn invalid_request(method: &str, reason: &str, payload: &Value) -> RpcError {
@@ -198,6 +246,27 @@ mod tests {
             RpcValidationMode::KnownMethods,
         )
         .expect("valid params");
+    }
+
+    #[test]
+    fn validates_thread_start_rejects_turn_level_sandbox_policy_key() {
+        let err = validate_rpc_request(
+            "thread/start",
+            &json!({"cwd":"/tmp","sandboxPolicy":{"type":"readOnly"}}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("thread/start must reject sandboxPolicy key");
+        assert!(matches!(err, RpcError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn validates_thread_start_accepts_legacy_sandbox_string() {
+        validate_rpc_request(
+            "thread/start",
+            &json!({"cwd":"/tmp","sandbox":"read-only"}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect("thread/start should accept sandbox string");
     }
 
     #[test]
@@ -250,6 +319,25 @@ mod tests {
             RpcValidationMode::KnownMethods,
         )
         .expect("unknown method response should pass");
+    }
+
+    #[test]
+    fn known_method_catalog_is_stable() {
+        assert_eq!(
+            methods::KNOWN,
+            [
+                methods::THREAD_START,
+                methods::THREAD_RESUME,
+                methods::THREAD_FORK,
+                methods::THREAD_ARCHIVE,
+                methods::THREAD_READ,
+                methods::THREAD_LIST,
+                methods::THREAD_LOADED_LIST,
+                methods::THREAD_ROLLBACK,
+                methods::TURN_START,
+                methods::TURN_INTERRUPT,
+            ]
+        );
     }
 
     #[test]

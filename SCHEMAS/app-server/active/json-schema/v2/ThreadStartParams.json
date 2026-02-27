@@ -38,20 +38,15 @@
         "null"
       ]
     },
-    "experimentalRawEvents": {
-      "description": "If true, opt into emitting raw response items on the event stream.\n\nThis is for internal use only (e.g. Codex Cloud). (TODO): Figure out a better way to categorize internal / experimental events & protocols.",
-      "default": false,
-      "type": "boolean"
-    },
-    "model": {
+    "serviceName": {
       "type": [
         "string",
         "null"
       ]
     },
-    "modelProvider": {
+    "ephemeral": {
       "type": [
-        "string",
+        "boolean",
         "null"
       ]
     },
@@ -64,16 +59,96 @@
           "type": "null"
         }
       ]
+    },
+    "personality": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Personality"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "modelProvider": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "definitions": {
     "AskForApproval": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "untrusted",
+            "on-failure",
+            "on-request",
+            "never"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "reject"
+          ],
+          "properties": {
+            "reject": {
+              "type": "object",
+              "required": [
+                "mcp_elicitations",
+                "rules",
+                "sandbox_approval"
+              ],
+              "properties": {
+                "mcp_elicitations": {
+                  "type": "boolean"
+                },
+                "rules": {
+                  "type": "boolean"
+                },
+                "sandbox_approval": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "title": "RejectAskForApproval"
+        }
+      ]
+    },
+    "DynamicToolSpec": {
+      "type": "object",
+      "required": [
+        "description",
+        "inputSchema",
+        "name"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": true,
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "Personality": {
       "type": "string",
       "enum": [
-        "untrusted",
-        "on-failure",
-        "on-request",
-        "never"
+        "none",
+        "friendly",
+        "pragmatic"
       ]
     },
     "SandboxMode": {

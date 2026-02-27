@@ -24,6 +24,35 @@
 ./scripts/check_schema_manifest.sh
 ```
 
+### 1.4 외부 드리프트 검사
+
+```bash
+./scripts/check_schema_drift.sh
+```
+
+- 기본 모드: `COCLAI_SCHEMA_DRIFT_MODE=soft` (warning only)
+- 차단 모드: `COCLAI_SCHEMA_DRIFT_MODE=hard` (drift 시 non-zero exit)
+- 릴리즈 preflight(`./scripts/release_preflight.sh`)는 `hard + source=codex`를 강제한다.
+
+### 1.5 문서-코드 계약 동기화 검사
+
+```bash
+./scripts/check_doc_contract_sync.sh
+```
+
+- 기본 모드: `COCLAI_DOC_SYNC_MODE=hard` (링크 커버리지 100% 미달 시 non-zero exit)
+- 완화 모드: `COCLAI_DOC_SYNC_MODE=soft` (warning only)
+- strict mismatch 차단: `COCLAI_DOC_SYNC_FAIL_ON_MISMATCH=1` (mismatch verdict 존재 시 non-zero exit)
+- 릴리즈 preflight(`./scripts/release_preflight.sh`)는 `COCLAI_DOC_SYNC_FAIL_ON_MISMATCH=1`을 강제한다.
+
+### 1.6 스크립트 smoke harness
+
+```bash
+./scripts/smoke_script_harness.sh
+```
+
+- schema/doc 스크립트의 정상/주입 실패 분기를 smoke 검증한다.
+
 런타임은 `spawn_local` 시점에 metadata/manifest를 fail-fast 검증한다.
 
 ## 2) Runtime/Lifecycle Contract
@@ -75,6 +104,16 @@ cargo test -p coclai_runtime --test contract_deterministic -- --nocapture
 APP_SERVER_CONTRACT=1 \
 cargo test -p coclai_runtime --test contract_real_cli -- --nocapture
 ```
+
+### 3.3 nightly/opt-in 통합 게이트 (옵션)
+
+```bash
+./scripts/run_nightly_opt_in_gate.sh
+```
+
+- 실행 결과 로그:
+  - `target/qa/nightly_opt_in/<timestamp>/script_smoke.log`
+  - `target/qa/nightly_opt_in/<timestamp>/real_cli_contract.log`
 
 ## 4) Performance Gate (Local)
 

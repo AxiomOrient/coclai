@@ -414,7 +414,9 @@ fn prune_state(
             .iter()
             .map(|(id, thread)| (id.clone(), thread.last_seq))
             .collect();
-        by_age.sort_unstable_by_key(|(_, seq)| *seq);
+        if remove_count > 0 {
+            by_age.select_nth_unstable_by_key(remove_count - 1, |(_, seq)| *seq);
+        }
         for (id, _) in by_age.into_iter().take(remove_count) {
             state.threads.remove(&id);
         }
@@ -445,9 +447,13 @@ fn prune_turns(thread: &mut ThreadState, max_turns: usize) {
         .filter(|(id, _)| Some(id.as_str()) != active)
         .map(|(id, turn)| (id.clone(), turn.last_seq))
         .collect();
-    candidates.sort_unstable_by_key(|(_, seq)| *seq);
 
     let removable = thread.turns.len().saturating_sub(max_turns);
+    if removable > 0 && !candidates.is_empty() {
+        let partition_idx = std::cmp::min(removable - 1, candidates.len() - 1);
+        candidates.select_nth_unstable_by_key(partition_idx, |(_, seq)| *seq);
+    }
+
     for (id, _) in candidates.into_iter().take(removable) {
         thread.turns.remove(&id);
     }
@@ -464,7 +470,10 @@ fn prune_items(turn: &mut TurnState, max_items: usize) {
         .iter()
         .map(|(id, item)| (id.clone(), item.last_seq))
         .collect();
-    by_age.sort_unstable_by_key(|(_, seq)| *seq);
+    if remove_count > 0 {
+        let partition_idx = std::cmp::min(remove_count - 1, by_age.len() - 1);
+        by_age.select_nth_unstable_by_key(partition_idx, |(_, seq)| *seq);
+    }
     for (id, _) in by_age.into_iter().take(remove_count) {
         turn.items.remove(&id);
     }

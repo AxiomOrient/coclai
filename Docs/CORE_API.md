@@ -26,15 +26,21 @@
 ### 1.2 명시적 경로 (전문가)
 
 - `WorkflowConfig`: `cwd + client_config + run_profile`를 하나의 데이터 모델로 고정
+- `WorkflowConfig::new(cwd)` 경로 정책:
+  - 입력이 상대 경로면 프로세스 `current_dir` 기준 절대 경로로 즉시 정규화
+  - 파일/디렉터리 존재 여부는 검사하지 않음(문자열 정규화만 수행)
+  - `current_dir` 조회가 실패하면 입력 문자열을 그대로 유지
 - `Workflow`: reusable client handle
   - `connect`, `run`, `run_with_profile`, `setup_session`, `shutdown`
-- 실행 예제: `crates/coclai/examples/workflow.rs`
+- 실행 예제:
+  - safe default: `crates/coclai/examples/workflow.rs`
+  - privileged opt-in: `crates/coclai/examples/workflow_privileged.rs`
 
 ### 1.3 JSON-RPC 직접 경로
 
 - `AppServer`: codex app-server JSON-RPC direct facade
 - `rpc_methods::*`: 오타 없이 메서드 이름을 재사용하기 위한 상수 집합
-- 실행 예제: `crates/coclai/examples/rpc_direct.rs`
+- 실행 예제: `crates/coclai/examples/rpc_direct.rs` (`turn/completed`까지 대기 후 최종 텍스트 수집)
 
 ```rust
 pub use ergonomic::{
@@ -245,6 +251,10 @@ impl Runtime {
 - `PromptRunParams::new`의 기본 effort는 `medium`
 - `run_prompt` 경로는 첨부 파일 경로를 실행 전 검증
 - `Session::close()` 이후 같은 핸들의 `ask/ask_with/interrupt_turn`은 로컬에서 즉시 거절
+- `Session::close()`가 원격 `thread/archive` RPC 에러를 반환해도 로컬 핸들은 닫힌 상태로 유지
+- `Session::close()` 재호출은 최초 close 결과를 캐시해 동일 결과를 반환
+- `Client::connect()`의 호환성 검증 실패 경로는 `runtime.shutdown()` 실패를 더 이상 무시하지 않음
+- `Runtime::shutdown()`은 dispatcher/supervisor join 실패를 `RuntimeError::Internal`로 전파
 
 ### 2.4 Hook 등록 API
 

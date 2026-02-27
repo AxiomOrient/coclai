@@ -1,39 +1,33 @@
-use std::process::ExitStatus;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::time::{sleep, Duration};
 
-use crate::errors::RuntimeError;
 use crate::state::ConnectionState;
 
 use super::lifecycle::{detach_generation, spawn_connection_generation};
-use super::rpc_io::resolve_transport_closed_pending;
 use super::state_projection::state_set_connection;
 use super::{now_millis, RestartPolicy, RuntimeInner};
 
-pub(super) async fn wait_for_transport_exit(
-    inner: &Arc<RuntimeInner>,
-) -> Result<Option<ExitStatus>, RuntimeError> {
-    let poll_ms = inner.supervisor_cfg.monitor_poll_ms.max(1);
-    loop {
-        if inner.shutting_down.load(Ordering::Acquire) {
-            return Ok(None);
-        }
+pub(super) async fn start_supervisor_task(inner: &Arc<RuntimeInner>) {
+    let supervisor_inner = Arc::clone(inner);
+    let supervisor_task = tokio::spawn(supervisor_loop(supervisor_inner));
+    inner
+        .tasks
+        .supervisor_task
+        .lock()
+        .await
+        .replace(supervisor_task);
+}
 
-        let exit_status = {
-            let mut guard = inner.transport.lock().await;
-            let Some(transport) = guard.as_mut() else {
-                return Ok(None);
-            };
-            transport.try_wait_exit()?
-        };
+pub(super) async fn wait_for_transport_close_signal(inner: &Arc<RuntimeInner>) -> bool {
+    if inner.counters.shutting_down.load(Ordering::Acquire) {
+        return false;
+    }
 
-        if let Some(status) = exit_status {
-            return Ok(Some(status));
-        }
-
-        sleep(Duration::from_millis(poll_ms)).await;
+    tokio::select! {
+        _ = inner.io.transport_closed_signal.notified() => true,
+        _ = inner.io.shutdown_signal.notified() => false,
     }
 }
 
@@ -70,26 +64,22 @@ pub(super) async fn supervisor_loop(inner: Arc<RuntimeInner>) {
     let mut restarts = 0u32;
 
     loop {
-        let _exit_status = match wait_for_transport_exit(&inner).await {
-            Ok(Some(status)) => status,
-            Ok(None) => break,
-            Err(_) => {
-                inner.initialized.store(false, Ordering::Release);
-                resolve_transport_closed_pending(&inner).await;
-                state_set_connection(&inner, ConnectionState::Dead);
-                break;
-            }
-        };
-
-        if inner.shutting_down.load(Ordering::Acquire) {
+        if !wait_for_transport_close_signal(&inner).await {
             break;
         }
 
-        inner.initialized.store(false, Ordering::Release);
-        let generation = inner.generation.load(Ordering::Acquire);
-        detach_generation(&inner).await;
+        if inner.counters.shutting_down.load(Ordering::Acquire) {
+            break;
+        }
 
-        match inner.supervisor_cfg.restart {
+        inner.counters.initialized.store(false, Ordering::Release);
+        let generation = inner.counters.generation.load(Ordering::Acquire);
+        if detach_generation(&inner).await.is_err() {
+            state_set_connection(&inner, ConnectionState::Dead);
+            break;
+        }
+
+        match inner.spec.supervisor_cfg.restart {
             RestartPolicy::Never => {
                 state_set_connection(&inner, ConnectionState::Dead);
                 break;
@@ -109,7 +99,7 @@ pub(super) async fn supervisor_loop(inner: Arc<RuntimeInner>) {
                 restarts = restarts.saturating_add(1);
                 sleep(delay).await;
 
-                if inner.shutting_down.load(Ordering::Acquire) {
+                if inner.counters.shutting_down.load(Ordering::Acquire) {
                     break;
                 }
 

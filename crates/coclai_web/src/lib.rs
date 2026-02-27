@@ -230,7 +230,16 @@ impl WebAdapter {
             ..ThreadStartParams::default()
         };
         let thread_id = match request.thread_id.as_deref() {
-            Some(thread_id) => self.adapter.thread_resume(thread_id, thread_params).await?,
+            Some(thread_id) => {
+                let resumed_thread_id =
+                    self.adapter.thread_resume(thread_id, thread_params).await?;
+                if resumed_thread_id != thread_id {
+                    return Err(WebError::Internal(format!(
+                        "thread/resume returned mismatched thread id: requested={thread_id} actual={resumed_thread_id}"
+                    )));
+                }
+                resumed_thread_id
+            }
             None => self.adapter.thread_start(thread_params).await?,
         };
 

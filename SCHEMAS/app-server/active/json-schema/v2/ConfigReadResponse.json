@@ -43,13 +43,158 @@
       },
       "additionalProperties": true
     },
-    "AskForApproval": {
+    "AppConfig": {
+      "type": "object",
+      "properties": {
+        "default_tools_approval_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppToolApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default_tools_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "destructive_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "open_world_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "tools": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppToolsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "AppToolApproval": {
       "type": "string",
       "enum": [
-        "untrusted",
-        "on-failure",
-        "on-request",
-        "never"
+        "auto",
+        "prompt",
+        "approve"
+      ]
+    },
+    "AppToolConfig": {
+      "type": "object",
+      "properties": {
+        "approval_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppToolApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "AppToolsConfig": {
+      "type": "object"
+    },
+    "AppsConfig": {
+      "type": "object",
+      "properties": {
+        "_default": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppsDefaultConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "AppsDefaultConfig": {
+      "type": "object",
+      "properties": {
+        "destructive_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "open_world_enabled": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "AskForApproval": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "untrusted",
+            "on-failure",
+            "on-request",
+            "never"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "reject"
+          ],
+          "properties": {
+            "reject": {
+              "type": "object",
+              "required": [
+                "mcp_elicitations",
+                "rules",
+                "sandbox_approval"
+              ],
+              "properties": {
+                "mcp_elicitations": {
+                  "type": "boolean"
+                },
+                "rules": {
+                  "type": "boolean"
+                },
+                "sandbox_approval": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "title": "RejectAskForApproval"
+        }
       ]
     },
     "Config": {
@@ -69,6 +214,16 @@
           "anyOf": [
             {
               "$ref": "#/definitions/AskForApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "web_search": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WebSearchMode"
             },
             {
               "type": "null"
@@ -213,16 +368,6 @@
               "type": "null"
             }
           ]
-        },
-        "web_search": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/WebSearchMode"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "additionalProperties": true
@@ -236,6 +381,12 @@
       ],
       "properties": {
         "config": true,
+        "disabledReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "$ref": "#/definitions/ConfigLayerSource"
         },

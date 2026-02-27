@@ -8,14 +8,14 @@ use crate::state::{reduce_in_place_with_limits, RuntimeState};
 use super::RuntimeInner;
 
 pub(super) fn state_snapshot_arc(inner: &Arc<RuntimeInner>) -> Arc<RuntimeState> {
-    match inner.state.read() {
+    match inner.snapshots.state.read() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     }
 }
 
 fn with_state_write<T>(inner: &Arc<RuntimeInner>, f: impl FnOnce(&mut RuntimeState) -> T) -> T {
-    match inner.state.write() {
+    match inner.snapshots.state.write() {
         Ok(mut guard) => {
             let state = Arc::make_mut(&mut guard);
             f(state)
@@ -36,7 +36,7 @@ pub(super) fn state_set_connection(inner: &Arc<RuntimeInner>, connection: Connec
 
 pub(super) fn state_apply_envelope(inner: &Arc<RuntimeInner>, envelope: &Envelope) {
     with_state_write(inner, |state| {
-        reduce_in_place_with_limits(state, envelope, &inner.state_projection_limits);
+        reduce_in_place_with_limits(state, envelope, &inner.spec.state_projection_limits);
     });
 }
 

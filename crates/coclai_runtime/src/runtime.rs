@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arc_swap::ArcSwapOption;
 use coclai_plugin_core::{HookContext, HookReport};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 #[cfg(test)]
@@ -24,8 +25,10 @@ use crate::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
 use crate::rpc_contract::{validate_rpc_request, validate_rpc_response, RpcValidationMode};
 use crate::runtime_schema::{validate_runtime_capacities, validate_schema_guard};
 use crate::sink::EventSink;
-use crate::state::{ConnectionState, RuntimeState, StateProjectionLimits};
+use crate::state::{RuntimeState, StateProjectionLimits};
 use crate::transport::{StdioProcessSpec, StdioTransport, StdioTransportConfig};
+#[cfg(test)]
+use crate::ConnectionState;
 
 type PendingResult = Result<Value, RpcError>;
 
@@ -38,11 +41,11 @@ mod supervisor;
 use dispatch::{
     event_sink_loop, send_rpc_error, send_rpc_result, validate_server_request_result_payload,
 };
-use lifecycle::spawn_connection_generation;
-use rpc_io::{call_raw_inner, notify_raw_inner, resolve_transport_closed_pending};
+use lifecycle::{shutdown_runtime, spawn_connection_generation};
+use rpc_io::{call_raw_inner, notify_raw_inner};
+use state_projection::state_remove_pending_server_request;
 use state_projection::state_snapshot_arc;
-use state_projection::{state_remove_pending_server_request, state_set_connection};
-use supervisor::supervisor_loop;
+use supervisor::start_supervisor_task;
 
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -113,7 +116,6 @@ pub enum RestartPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SupervisorConfig {
     pub restart: RestartPolicy,
-    pub monitor_poll_ms: u64,
     pub shutdown_flush_timeout_ms: u64,
     pub shutdown_terminate_grace_ms: u64,
 }
@@ -122,7 +124,6 @@ impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
             restart: RestartPolicy::Never,
-            monitor_poll_ms: 25,
             shutdown_flush_timeout_ms: 500,
             shutdown_terminate_grace_ms: 750,
         }
@@ -138,38 +139,60 @@ struct PendingServerRequestEntry {
     deadline_millis: i64,
 }
 
+struct RuntimeCounters {
+    initialized: AtomicBool,
+    shutting_down: AtomicBool,
+    generation: AtomicU64,
+    next_rpc_id: AtomicU64,
+    next_seq: AtomicU64,
+}
+
+struct RuntimeSpec {
+    process: StdioProcessSpec,
+    transport_cfg: StdioTransportConfig,
+    initialize_params: Value,
+    supervisor_cfg: SupervisorConfig,
+    rpc_response_timeout: Duration,
+    server_request_cfg: ServerRequestConfig,
+    state_projection_limits: StateProjectionLimits,
+}
+
+struct RuntimeIo {
+    pending: Mutex<HashMap<u64, oneshot::Sender<PendingResult>>>,
+    outbound_tx: ArcSwapOption<mpsc::Sender<Value>>,
+    live_tx: broadcast::Sender<Envelope>,
+    pending_server_requests: Mutex<HashMap<String, PendingServerRequestEntry>>,
+    server_request_tx: mpsc::Sender<ServerRequest>,
+    server_request_rx: Mutex<Option<mpsc::Receiver<ServerRequest>>>,
+    event_sink_tx: Option<mpsc::Sender<Envelope>>,
+    transport_closed_signal: Notify,
+    shutdown_signal: Notify,
+}
+
+struct RuntimeTasks {
+    event_sink_task: Mutex<Option<JoinHandle<()>>>,
+    supervisor_task: Mutex<Option<JoinHandle<()>>>,
+    dispatcher_task: Mutex<Option<JoinHandle<()>>>,
+    transport: Mutex<Option<StdioTransport>>,
+}
+
+struct RuntimeSnapshots {
+    state: RwLock<Arc<RuntimeState>>,
+    initialize_result: RwLock<Option<Value>>,
+}
+
 #[derive(Clone)]
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
 }
 
 struct RuntimeInner {
-    initialized: AtomicBool,
-    shutting_down: AtomicBool,
-    generation: AtomicU64,
-    next_rpc_id: AtomicU64,
-    next_seq: AtomicU64,
-    process: StdioProcessSpec,
-    transport_cfg: StdioTransportConfig,
-    initialize_params: Value,
-    supervisor_cfg: SupervisorConfig,
-    rpc_response_timeout: Duration,
-    pending: Mutex<HashMap<u64, oneshot::Sender<PendingResult>>>,
-    outbound_tx: Mutex<Option<mpsc::Sender<Value>>>,
-    live_tx: broadcast::Sender<Envelope>,
-    server_request_cfg: ServerRequestConfig,
-    pending_server_requests: Mutex<HashMap<String, PendingServerRequestEntry>>,
-    server_request_tx: mpsc::Sender<ServerRequest>,
-    server_request_rx: Mutex<Option<mpsc::Receiver<ServerRequest>>>,
-    event_sink_tx: Option<mpsc::Sender<Envelope>>,
+    counters: RuntimeCounters,
+    spec: RuntimeSpec,
+    io: RuntimeIo,
+    tasks: RuntimeTasks,
+    snapshots: RuntimeSnapshots,
     metrics: Arc<RuntimeMetrics>,
-    event_sink_task: Mutex<Option<JoinHandle<()>>>,
-    supervisor_task: Mutex<Option<JoinHandle<()>>>,
-    dispatcher_task: Mutex<Option<JoinHandle<()>>>,
-    transport: Mutex<Option<StdioTransport>>,
-    state: RwLock<Arc<RuntimeState>>,
-    initialize_result: RwLock<Option<Value>>,
-    state_projection_limits: StateProjectionLimits,
     hooks: HookKernel,
 }
 
@@ -215,56 +238,60 @@ impl Runtime {
 
         let runtime = Self {
             inner: Arc::new(RuntimeInner {
-                initialized: AtomicBool::new(false),
-                shutting_down: AtomicBool::new(false),
-                generation: AtomicU64::new(0),
-                next_rpc_id: AtomicU64::new(1),
-                next_seq: AtomicU64::new(0),
-                process,
-                transport_cfg: transport,
-                initialize_params,
-                supervisor_cfg: supervisor,
-                rpc_response_timeout,
-                pending: Mutex::new(HashMap::new()),
-                outbound_tx: Mutex::new(None),
-                live_tx,
-                server_request_cfg: server_requests,
-                pending_server_requests: Mutex::new(HashMap::new()),
-                server_request_tx,
-                server_request_rx: Mutex::new(Some(server_request_rx)),
-                event_sink_tx,
+                counters: RuntimeCounters {
+                    initialized: AtomicBool::new(false),
+                    shutting_down: AtomicBool::new(false),
+                    generation: AtomicU64::new(0),
+                    next_rpc_id: AtomicU64::new(1),
+                    next_seq: AtomicU64::new(0),
+                },
+                spec: RuntimeSpec {
+                    process,
+                    transport_cfg: transport,
+                    initialize_params,
+                    supervisor_cfg: supervisor,
+                    rpc_response_timeout,
+                    server_request_cfg: server_requests,
+                    state_projection_limits,
+                },
+                io: RuntimeIo {
+                    pending: Mutex::new(HashMap::new()),
+                    outbound_tx: ArcSwapOption::new(None),
+                    live_tx,
+                    pending_server_requests: Mutex::new(HashMap::new()),
+                    server_request_tx,
+                    server_request_rx: Mutex::new(Some(server_request_rx)),
+                    event_sink_tx,
+                    transport_closed_signal: Notify::new(),
+                    shutdown_signal: Notify::new(),
+                },
+                tasks: RuntimeTasks {
+                    event_sink_task: Mutex::new(event_sink_task),
+                    supervisor_task: Mutex::new(None),
+                    dispatcher_task: Mutex::new(None),
+                    transport: Mutex::new(None),
+                },
+                snapshots: RuntimeSnapshots {
+                    state: RwLock::new(Arc::new(RuntimeState::default())),
+                    initialize_result: RwLock::new(None),
+                },
                 metrics,
-                event_sink_task: Mutex::new(event_sink_task),
-                supervisor_task: Mutex::new(None),
-                dispatcher_task: Mutex::new(None),
-                transport: Mutex::new(None),
-                state: RwLock::new(Arc::new(RuntimeState::default())),
-                initialize_result: RwLock::new(None),
-                state_projection_limits,
                 hooks: HookKernel::new(hooks),
             }),
         };
 
         spawn_connection_generation(&runtime.inner, 0).await?;
-
-        let supervisor_inner = Arc::clone(&runtime.inner);
-        let supervisor_task = tokio::spawn(supervisor_loop(supervisor_inner));
-        runtime
-            .inner
-            .supervisor_task
-            .lock()
-            .await
-            .replace(supervisor_task);
+        start_supervisor_task(&runtime.inner).await;
 
         Ok(runtime)
     }
 
     pub fn subscribe_live(&self) -> broadcast::Receiver<Envelope> {
-        self.inner.live_tx.subscribe()
+        self.inner.io.live_tx.subscribe()
     }
 
     pub fn is_initialized(&self) -> bool {
-        self.inner.initialized.load(Ordering::Acquire)
+        self.inner.counters.initialized.load(Ordering::Acquire)
     }
 
     pub fn state_snapshot(&self) -> Arc<RuntimeState> {
@@ -272,7 +299,7 @@ impl Runtime {
     }
 
     pub fn initialize_result_snapshot(&self) -> Option<Value> {
-        match self.inner.initialize_result.read() {
+        match self.inner.snapshots.initialize_result.read() {
             Ok(guard) => guard.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         }
@@ -310,7 +337,7 @@ impl Runtime {
     }
 
     pub(crate) fn next_hook_correlation_id(&self) -> String {
-        let seq = self.inner.next_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        let seq = self.inner.counters.next_seq.fetch_add(1, Ordering::AcqRel) + 1;
         format!("hk-{seq}")
     }
 
@@ -346,6 +373,7 @@ impl Runtime {
         &self,
     ) -> Result<mpsc::Receiver<ServerRequest>, RuntimeError> {
         self.inner
+            .io
             .server_request_rx
             .lock()
             .await
@@ -359,7 +387,7 @@ impl Runtime {
         result: Value,
     ) -> Result<(), RuntimeError> {
         let entry = {
-            let mut guard = self.inner.pending_server_requests.lock().await;
+            let mut guard = self.inner.io.pending_server_requests.lock().await;
             let entry = guard.get(approval_id).cloned().ok_or_else(|| {
                 RuntimeError::Internal(format!("approval id not found: {approval_id}"))
             })?;
@@ -378,7 +406,7 @@ impl Runtime {
         err: crate::errors::RpcErrorObject,
     ) -> Result<(), RuntimeError> {
         let entry = {
-            let mut guard = self.inner.pending_server_requests.lock().await;
+            let mut guard = self.inner.io.pending_server_requests.lock().await;
             guard.remove(approval_id).ok_or_else(|| {
                 RuntimeError::Internal(format!("approval id not found: {approval_id}"))
             })?
@@ -398,7 +426,7 @@ impl Runtime {
     }
 
     pub async fn call_raw(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        self.call_raw_internal(method, params, true, self.inner.rpc_response_timeout)
+        self.call_raw_internal(method, params, true, self.inner.spec.rpc_response_timeout)
             .await
     }
 
@@ -418,7 +446,7 @@ impl Runtime {
     ) -> Result<Value, RpcError> {
         validate_rpc_request(method, &params, mode)?;
         let result = self
-            .call_raw_internal(method, params, true, self.inner.rpc_response_timeout)
+            .call_raw_internal(method, params, true, self.inner.spec.rpc_response_timeout)
             .await?;
         validate_rpc_response(method, &result, mode)?;
         Ok(result)
@@ -493,44 +521,40 @@ impl Runtime {
         self.notify_raw_internal(method, params, true).await
     }
 
+    /// Typed JSON-RPC notify with known-method request validation.
+    pub async fn notify_typed_validated<P>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<(), RuntimeError>
+    where
+        P: Serialize,
+    {
+        self.notify_typed_validated_with_mode(method, params, RpcValidationMode::KnownMethods)
+            .await
+    }
+
+    /// Typed JSON-RPC notify with explicit validation mode.
+    pub async fn notify_typed_validated_with_mode<P>(
+        &self,
+        method: &str,
+        params: P,
+        mode: RpcValidationMode,
+    ) -> Result<(), RuntimeError>
+    where
+        P: Serialize,
+    {
+        let params_value = serde_json::to_value(params).map_err(|err| {
+            RuntimeError::InvalidConfig(format!(
+                "invalid json-rpc notify payload: failed to serialize json-rpc params for {method}: {err}"
+            ))
+        })?;
+        self.notify_validated_with_mode(method, params_value, mode)
+            .await
+    }
+
     pub async fn shutdown(&self) -> Result<(), RuntimeError> {
-        self.inner.shutting_down.store(true, Ordering::Release);
-        self.inner.initialized.store(false, Ordering::Release);
-        state_set_connection(&self.inner, ConnectionState::ShuttingDown);
-
-        {
-            let mut outbound_guard = self.inner.outbound_tx.lock().await;
-            outbound_guard.take();
-        }
-
-        if let Some(transport) = self.inner.transport.lock().await.take() {
-            let flush_timeout =
-                Duration::from_millis(self.inner.supervisor_cfg.shutdown_flush_timeout_ms);
-            let terminate_grace =
-                Duration::from_millis(self.inner.supervisor_cfg.shutdown_terminate_grace_ms);
-            transport
-                .terminate_and_join(flush_timeout, terminate_grace)
-                .await?;
-        }
-
-        if let Some(dispatcher_task) = self.inner.dispatcher_task.lock().await.take() {
-            let _ = dispatcher_task.await;
-        }
-
-        resolve_transport_closed_pending(&self.inner).await;
-
-        if let Some(supervisor_task) = self.inner.supervisor_task.lock().await.take() {
-            let _ = supervisor_task.await;
-        }
-
-        if let Some(event_sink_task) = self.inner.event_sink_task.lock().await.take() {
-            event_sink_task.abort();
-            let _ = event_sink_task.await;
-        }
-
-        state_set_connection(&self.inner, ConnectionState::Dead);
-
-        Ok(())
+        shutdown_runtime(&self.inner).await
     }
 
     async fn call_raw_internal(

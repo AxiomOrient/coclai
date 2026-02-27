@@ -21,12 +21,32 @@
     }
   },
   "definitions": {
+    "InputModality": {
+      "description": "Canonical user-input modality tags advertised by a model.",
+      "oneOf": [
+        {
+          "description": "Plain text turns and tool payloads.",
+          "type": "string",
+          "enum": [
+            "text"
+          ]
+        },
+        {
+          "description": "Image attachments included in user turns.",
+          "type": "string",
+          "enum": [
+            "image"
+          ]
+        }
+      ]
+    },
     "Model": {
       "type": "object",
       "required": [
         "defaultReasoningEffort",
         "description",
         "displayName",
+        "hidden",
         "id",
         "isDefault",
         "model",
@@ -42,8 +62,21 @@
         "displayName": {
           "type": "string"
         },
+        "hidden": {
+          "type": "boolean"
+        },
         "id": {
           "type": "string"
+        },
+        "inputModalities": {
+          "default": [
+            "text",
+            "image"
+          ],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/InputModality"
+          }
         },
         "isDefault": {
           "type": "boolean"
@@ -56,6 +89,16 @@
           "items": {
             "$ref": "#/definitions/ReasoningEffortOption"
           }
+        },
+        "supportsPersonality": {
+          "default": false,
+          "type": "boolean"
+        },
+        "upgrade": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

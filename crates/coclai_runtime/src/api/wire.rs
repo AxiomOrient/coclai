@@ -2,9 +2,11 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
+use crate::errors::RpcError;
+
 use super::{
-    ByteRange, ExternalNetworkAccess, InputItem, PromptAttachment, PromptRunError, SandboxPolicy,
-    SandboxPreset, TextElement, ThreadStartParams, TurnStartParams,
+    ApprovalPolicy, ByteRange, ExternalNetworkAccess, InputItem, PromptAttachment, PromptRunError,
+    SandboxPolicy, SandboxPreset, TextElement, ThreadStartParams, TurnStartParams,
 };
 
 pub(super) fn validate_prompt_attachments(
@@ -27,6 +29,108 @@ pub(super) fn validate_prompt_attachments(
         }
     }
     Ok(())
+}
+
+/// Enforce privileged sandbox escalation policy (SEC-004) for session-start/resume.
+/// High-risk sandbox usage requires:
+/// 1) explicit opt-in (`privileged_escalation_approved`)
+/// 2) non-never approval policy
+/// 3) explicit execution scope (`cwd` or writable roots)
+pub(super) fn validate_thread_start_security(p: &ThreadStartParams) -> Result<(), RpcError> {
+    let Some(sandbox_policy) = p.sandbox_policy.as_ref() else {
+        return Ok(());
+    };
+    if !is_privileged_sandbox_policy(sandbox_policy) {
+        return Ok(());
+    }
+    if !p.privileged_escalation_approved {
+        return Err(RpcError::InvalidRequest(
+            "privileged sandbox requires explicit escalation approval".to_owned(),
+        ));
+    }
+    let approval = p.approval_policy.unwrap_or(ApprovalPolicy::Never);
+    if approval == ApprovalPolicy::Never {
+        return Err(RpcError::InvalidRequest(
+            "privileged sandbox requires non-never approval policy".to_owned(),
+        ));
+    }
+    if !has_explicit_scope(p.cwd.as_deref(), sandbox_policy) {
+        return Err(RpcError::InvalidRequest(
+            "privileged sandbox requires explicit scope via cwd or writable roots".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Enforce privileged sandbox escalation policy (SEC-004) for turn/start.
+pub(super) fn validate_turn_start_security(p: &TurnStartParams) -> Result<(), RpcError> {
+    let Some(sandbox_policy) = p.sandbox_policy.as_ref() else {
+        return Ok(());
+    };
+    if !is_privileged_sandbox_policy(sandbox_policy) {
+        return Ok(());
+    }
+    if !p.privileged_escalation_approved {
+        return Err(RpcError::InvalidRequest(
+            "privileged sandbox requires explicit escalation approval".to_owned(),
+        ));
+    }
+    let approval = p.approval_policy.unwrap_or(ApprovalPolicy::Never);
+    if approval == ApprovalPolicy::Never {
+        return Err(RpcError::InvalidRequest(
+            "privileged sandbox requires non-never approval policy".to_owned(),
+        ));
+    }
+    if !has_explicit_scope(p.cwd.as_deref(), sandbox_policy) {
+        return Err(RpcError::InvalidRequest(
+            "privileged sandbox requires explicit scope via cwd or writable roots".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_privileged_sandbox_policy(policy: &SandboxPolicy) -> bool {
+    match policy {
+        SandboxPolicy::Preset(SandboxPreset::ReadOnly) => false,
+        SandboxPolicy::Preset(_) => true,
+        SandboxPolicy::Raw(raw) => !raw_policy_is_read_only(raw),
+    }
+}
+
+fn raw_policy_is_read_only(raw: &Value) -> bool {
+    let Some(raw_obj) = raw.as_object() else {
+        return false;
+    };
+    matches!(
+        raw_obj.get("type").and_then(Value::as_str),
+        Some("readOnly")
+    )
+}
+
+fn has_explicit_scope(cwd: Option<&str>, sandbox_policy: &SandboxPolicy) -> bool {
+    if cwd.is_some_and(|v| !v.trim().is_empty()) {
+        return true;
+    }
+    match sandbox_policy {
+        SandboxPolicy::Preset(SandboxPreset::WorkspaceWrite { writable_roots, .. }) => {
+            writable_roots.iter().any(|root| !root.trim().is_empty())
+        }
+        SandboxPolicy::Raw(raw) => raw_writable_roots_non_empty(raw),
+        _ => false,
+    }
+}
+
+fn raw_writable_roots_non_empty(raw: &Value) -> bool {
+    let Some(raw_obj) = raw.as_object() else {
+        return false;
+    };
+    let Some(roots) = raw_obj.get("writableRoots").and_then(Value::as_array) else {
+        return false;
+    };
+    roots
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|root| !root.trim().is_empty())
 }
 
 fn resolve_attachment_path(cwd: &str, path: &str) -> PathBuf {

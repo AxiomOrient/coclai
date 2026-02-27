@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use coclai_runtime::api::ThreadStartParams;
 use coclai_runtime::approvals::ServerRequest;
-use coclai_runtime::events::{Direction, MsgKind};
+use coclai_runtime::events::{Direction, JsonRpcId, MsgKind};
 use coclai_runtime::runtime::{RuntimeConfig, SchemaGuardConfig};
 use coclai_runtime::transport::StdioProcessSpec;
 use coclai_runtime::PluginContractVersion;
@@ -145,6 +145,7 @@ struct FakeWebAdapterState {
     start_calls: usize,
     start_params: Vec<ThreadStartParams>,
     resume_calls: Vec<(String, ThreadStartParams)>,
+    resume_result_thread_id: Option<String>,
     turn_start_calls: Vec<Value>,
     archive_calls: Vec<String>,
     approval_calls: Vec<(String, Value)>,
@@ -160,6 +161,7 @@ impl Default for FakeWebAdapterState {
             start_calls: 0,
             start_params: Vec::new(),
             resume_calls: Vec::new(),
+            resume_result_thread_id: None,
             turn_start_calls: Vec::new(),
             archive_calls: Vec::new(),
             approval_calls: Vec::new(),
@@ -200,7 +202,10 @@ impl WebPluginAdapter for FakeWebAdapter {
         Box::pin(async move {
             let mut state = self.state.lock().expect("fake adapter state lock");
             state.resume_calls.push((thread_id.to_owned(), params));
-            Ok(thread_id.to_owned())
+            Ok(state
+                .resume_result_thread_id
+                .clone()
+                .unwrap_or_else(|| thread_id.to_owned()))
         })
     }
 
@@ -412,18 +417,31 @@ async fn serialize_envelope_to_sse() {
         seq: 1,
         ts_millis: 0,
         direction: Direction::Inbound,
-        kind: MsgKind::Notification,
-        rpc_id: None,
-        method: Some("turn/started".to_owned()),
+        kind: MsgKind::Response,
+        rpc_id: Some(JsonRpcId::Number(777)),
+        method: None,
         thread_id: Some("thr_1".to_owned()),
         turn_id: Some("turn_1".to_owned()),
         item_id: None,
-        json: json!({"method":"turn/started","params":{}}),
+        json: json!({"id":777,"result":{"ok":true}}),
     };
 
     let sse = serialize_sse_envelope(&envelope).expect("serialize");
     assert!(sse.starts_with("data: {"));
     assert!(sse.ends_with("\n\n"));
+    let payload = sse
+        .strip_prefix("data: ")
+        .and_then(|line| line.strip_suffix("\n\n"))
+        .expect("sse payload framing");
+    assert!(
+        !payload.contains("\"rpcId\""),
+        "external SSE payload must not expose internal rpc id"
+    );
+    let json_payload: Value = serde_json::from_str(payload).expect("parse sse json payload");
+    assert!(
+        json_payload["json"].get("id").is_none(),
+        "response json must not expose internal rpc id"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -694,6 +712,60 @@ async fn create_session_rejects_untracked_thread_id() {
     assert_eq!(err, WebError::Forbidden);
 
     runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn create_session_rejects_resume_thread_id_mismatch() {
+    let (_live_tx, live_rx) = broadcast::channel::<Envelope>(8);
+    let (_request_tx, request_rx) = tokio::sync::mpsc::channel::<ServerRequest>(8);
+    let fake_state = Arc::new(Mutex::new(FakeWebAdapterState {
+        start_thread_id: "thr_owned".to_owned(),
+        resume_result_thread_id: Some("thr_unexpected".to_owned()),
+        ..FakeWebAdapterState::default()
+    }));
+    let adapter: Arc<dyn WebPluginAdapter> = Arc::new(FakeWebAdapter {
+        state: Arc::clone(&fake_state),
+        streams: Arc::new(Mutex::new(Some(WebRuntimeStreams {
+            request_rx,
+            live_rx,
+        }))),
+    });
+    let web = WebAdapter::spawn_with_adapter(adapter, WebAdapterConfig::default())
+        .await
+        .expect("spawn with fake adapter");
+
+    let session = web
+        .create_session(
+            "tenant_a",
+            CreateSessionRequest {
+                artifact_id: "doc:resume-mismatch".to_owned(),
+                model: None,
+                thread_id: None,
+            },
+        )
+        .await
+        .expect("create seed session");
+    assert_eq!(session.thread_id, "thr_owned");
+
+    let err = web
+        .create_session(
+            "tenant_a",
+            CreateSessionRequest {
+                artifact_id: "doc:resume-mismatch".to_owned(),
+                model: None,
+                thread_id: Some("thr_owned".to_owned()),
+            },
+        )
+        .await
+        .expect_err("mismatched resume thread id must fail");
+    match err {
+        WebError::Internal(message) => {
+            assert!(message.contains("thread/resume returned mismatched thread id"));
+            assert!(message.contains("requested=thr_owned"));
+            assert!(message.contains("actual=thr_unexpected"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

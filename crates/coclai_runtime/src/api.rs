@@ -1,14 +1,9 @@
-use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use coclai_plugin_core::{
-    HookAction, HookAttachment, HookContext, HookIssue, HookIssueClass, HookPatch, HookPhase,
-    HookReport,
-};
-use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use coclai_plugin_core::HookPhase;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
-use thiserror::Error;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{timeout, Instant};
 
@@ -16,16 +11,30 @@ use crate::errors::RpcError;
 use crate::errors::RuntimeError;
 use crate::hooks::{PreHookDecision, RuntimeHookConfig};
 use crate::runtime::Runtime;
-use crate::turn_output::{parse_thread_id, parse_turn_id, AssistantTextCollector};
+use crate::turn_output::{parse_thread_id, AssistantTextCollector};
 
+mod flow;
+mod models;
+mod ops;
 mod turn_error;
 mod wire;
 
+use flow::{
+    apply_pre_hook_actions_to_prompt, apply_pre_hook_actions_to_session, build_hook_context,
+    extract_assistant_text_from_turn, interrupt_turn_best_effort, result_status, HookContextInput,
+    HookExecutionState, LaggedTurnTerminal, PromptMutationState, SessionMutationState,
+};
+pub use models::{
+    PromptRunError, PromptRunParams, PromptRunResult, PromptTurnFailure, PromptTurnTerminalState,
+};
+use ops::{deserialize_result, serialize_params};
 use turn_error::{extract_turn_error_signal, PromptTurnErrorSignal};
 use wire::{
-    build_prompt_inputs, input_item_to_wire, thread_overrides_to_wire, thread_start_params_to_wire,
-    turn_start_params_to_wire, validate_prompt_attachments,
+    build_prompt_inputs, thread_overrides_to_wire, thread_start_params_to_wire,
+    validate_prompt_attachments, validate_thread_start_security,
 };
+#[cfg(test)]
+use wire::{input_item_to_wire, turn_start_params_to_wire};
 
 pub type RpcId = u64;
 pub type ThreadId = String;
@@ -200,6 +209,8 @@ pub struct ThreadStartParams {
     pub cwd: Option<String>,
     pub approval_policy: Option<ApprovalPolicy>,
     pub sandbox_policy: Option<SandboxPolicy>,
+    /// Explicit opt-in gate for privileged sandbox usage (SEC-004).
+    pub privileged_escalation_approved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,191 +552,12 @@ pub struct TurnStartParams {
     pub cwd: Option<String>,
     pub approval_policy: Option<ApprovalPolicy>,
     pub sandbox_policy: Option<SandboxPolicy>,
+    /// Explicit opt-in gate for privileged sandbox usage (SEC-004).
+    pub privileged_escalation_approved: bool,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
     pub summary: Option<String>,
     pub output_schema: Option<Value>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PromptRunParams {
-    pub cwd: String,
-    pub prompt: String,
-    pub model: Option<String>,
-    pub effort: Option<ReasoningEffort>,
-    pub approval_policy: ApprovalPolicy,
-    pub sandbox_policy: SandboxPolicy,
-    pub attachments: Vec<PromptAttachment>,
-    pub timeout: Duration,
-}
-
-impl PromptRunParams {
-    /// Create prompt-run params with safe defaults.
-    /// Allocation: two String allocations for cwd/prompt. Complexity: O(n), n = input lengths.
-    pub fn new(cwd: impl Into<String>, prompt: impl Into<String>) -> Self {
-        Self {
-            cwd: cwd.into(),
-            prompt: prompt.into(),
-            model: None,
-            effort: Some(DEFAULT_REASONING_EFFORT),
-            approval_policy: ApprovalPolicy::Never,
-            sandbox_policy: SandboxPolicy::Preset(SandboxPreset::ReadOnly),
-            attachments: Vec::new(),
-            timeout: Duration::from_secs(120),
-        }
-    }
-
-    /// Set explicit model override.
-    /// Allocation: one String. Complexity: O(model length).
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
-        self
-    }
-
-    /// Set explicit reasoning effort.
-    /// Allocation: none. Complexity: O(1).
-    pub fn with_effort(mut self, effort: ReasoningEffort) -> Self {
-        self.effort = Some(effort);
-        self
-    }
-
-    /// Set approval policy override.
-    /// Allocation: none. Complexity: O(1).
-    pub fn with_approval_policy(mut self, approval_policy: ApprovalPolicy) -> Self {
-        self.approval_policy = approval_policy;
-        self
-    }
-
-    /// Set sandbox policy override.
-    /// Allocation: depends on sandbox payload move/clone at callsite. Complexity: O(1).
-    pub fn with_sandbox_policy(mut self, sandbox_policy: SandboxPolicy) -> Self {
-        self.sandbox_policy = sandbox_policy;
-        self
-    }
-
-    /// Set prompt timeout.
-    /// Allocation: none. Complexity: O(1).
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-
-    /// Add one generic attachment.
-    /// Allocation: amortized O(1) push. Complexity: O(1).
-    pub fn with_attachment(mut self, attachment: PromptAttachment) -> Self {
-        self.attachments.push(attachment);
-        self
-    }
-
-    /// Add one `@path` attachment.
-    /// Allocation: one String. Complexity: O(path length).
-    pub fn attach_path(self, path: impl Into<String>) -> Self {
-        self.with_attachment(PromptAttachment::AtPath {
-            path: path.into(),
-            placeholder: None,
-        })
-    }
-
-    /// Add one `@path` attachment with placeholder.
-    /// Allocation: two Strings. Complexity: O(path + placeholder length).
-    pub fn attach_path_with_placeholder(
-        self,
-        path: impl Into<String>,
-        placeholder: impl Into<String>,
-    ) -> Self {
-        self.with_attachment(PromptAttachment::AtPath {
-            path: path.into(),
-            placeholder: Some(placeholder.into()),
-        })
-    }
-
-    /// Add one remote image attachment.
-    /// Allocation: one String. Complexity: O(url length).
-    pub fn attach_image_url(self, url: impl Into<String>) -> Self {
-        self.with_attachment(PromptAttachment::ImageUrl { url: url.into() })
-    }
-
-    /// Add one local image attachment.
-    /// Allocation: one String. Complexity: O(path length).
-    pub fn attach_local_image(self, path: impl Into<String>) -> Self {
-        self.with_attachment(PromptAttachment::LocalImage { path: path.into() })
-    }
-
-    /// Add one skill attachment.
-    /// Allocation: two Strings. Complexity: O(name + path length).
-    pub fn attach_skill(self, name: impl Into<String>, path: impl Into<String>) -> Self {
-        self.with_attachment(PromptAttachment::Skill {
-            name: name.into(),
-            path: path.into(),
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PromptRunResult {
-    pub thread_id: ThreadId,
-    pub turn_id: TurnId,
-    pub assistant_text: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptTurnTerminalState {
-    Failed,
-    CompletedWithoutAssistantText,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PromptTurnFailure {
-    pub terminal_state: PromptTurnTerminalState,
-    pub source_method: String,
-    pub code: Option<i64>,
-    pub message: String,
-}
-
-impl std::fmt::Display for PromptTurnFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let terminal = match self.terminal_state {
-            PromptTurnTerminalState::Failed => "failed",
-            PromptTurnTerminalState::CompletedWithoutAssistantText => {
-                "completed_without_assistant_text"
-            }
-        };
-        if let Some(code) = self.code {
-            write!(
-                f,
-                "terminal={terminal} source_method={} code={code} message={}",
-                self.source_method, self.message
-            )
-        } else {
-            write!(
-                f,
-                "terminal={terminal} source_method={} message={}",
-                self.source_method, self.message
-            )
-        }
-    }
-}
-
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum PromptRunError {
-    #[error("rpc error: {0}")]
-    Rpc(#[from] RpcError),
-    #[error("runtime error: {0}")]
-    Runtime(#[from] RuntimeError),
-    #[error("turn failed: {0}")]
-    TurnFailedWithContext(PromptTurnFailure),
-    #[error("turn failed")]
-    TurnFailed,
-    #[error("turn interrupted")]
-    TurnInterrupted,
-    #[error("turn timed out after {0:?}")]
-    Timeout(Duration),
-    #[error("turn completed without assistant text: {0}")]
-    TurnCompletedWithoutAssistantText(PromptTurnFailure),
-    #[error("assistant text is empty")]
-    EmptyAssistantText,
-    #[error("attachment not found: {0}")]
-    AttachmentNotFound(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -745,362 +577,6 @@ impl std::fmt::Debug for ThreadHandle {
         f.debug_struct("ThreadHandle")
             .field("thread_id", &self.thread_id)
             .finish()
-    }
-}
-
-impl ThreadHandle {
-    pub fn runtime(&self) -> &Runtime {
-        &self.runtime
-    }
-
-    pub async fn turn_start(&self, p: TurnStartParams) -> Result<TurnHandle, RpcError> {
-        if p.input.is_empty() {
-            return Err(RpcError::InvalidRequest(
-                "turn input must not be empty".to_owned(),
-            ));
-        }
-
-        let response = self
-            .runtime
-            .call_raw("turn/start", turn_start_params_to_wire(&self.thread_id, &p))
-            .await?;
-
-        let turn_id = parse_turn_id(&response).ok_or_else(|| {
-            RpcError::InvalidRequest(format!("turn/start missing turn id in result: {response}"))
-        })?;
-
-        Ok(TurnHandle {
-            turn_id,
-            thread_id: self.thread_id.clone(),
-        })
-    }
-
-    /// Start a follow-up turn anchored to an expected previous turn id.
-    /// Allocation: JSON params + input item wire objects.
-    /// Complexity: O(n), n = input item count.
-    pub async fn turn_steer(
-        &self,
-        expected_turn_id: &str,
-        input: Vec<InputItem>,
-    ) -> Result<TurnId, RpcError> {
-        if input.is_empty() {
-            return Err(RpcError::InvalidRequest(
-                "turn input must not be empty".to_owned(),
-            ));
-        }
-
-        let mut params = Map::<String, Value>::new();
-        params.insert("threadId".to_owned(), Value::String(self.thread_id.clone()));
-        params.insert(
-            "expectedTurnId".to_owned(),
-            Value::String(expected_turn_id.to_owned()),
-        );
-        params.insert(
-            "input".to_owned(),
-            Value::Array(input.iter().map(input_item_to_wire).collect()),
-        );
-        let response = self
-            .runtime
-            .call_raw("turn/start", Value::Object(params))
-            .await?;
-        parse_turn_id(&response).ok_or_else(|| {
-            RpcError::InvalidRequest(format!(
-                "turn/start(steer) missing turn id in result: {response}"
-            ))
-        })
-    }
-
-    pub async fn turn_interrupt(&self, turn_id: &str) -> Result<(), RpcError> {
-        self.runtime.turn_interrupt(&self.thread_id, turn_id).await
-    }
-}
-
-fn serialize_params<T: Serialize>(method: &str, params: &T) -> Result<Value, RpcError> {
-    serde_json::to_value(params)
-        .map_err(|error| RpcError::InvalidRequest(format!("{method} invalid params: {error}")))
-}
-
-fn deserialize_result<T: DeserializeOwned>(method: &str, response: Value) -> Result<T, RpcError> {
-    serde_json::from_value(response.clone()).map_err(|error| {
-        RpcError::InvalidRequest(format!(
-            "{method} invalid result: {error}; response: {response}"
-        ))
-    })
-}
-
-#[derive(Clone, Debug)]
-struct HookExecutionState {
-    correlation_id: String,
-    report: HookReport,
-    metadata: Value,
-}
-
-impl HookExecutionState {
-    fn new(correlation_id: String) -> Self {
-        Self {
-            correlation_id,
-            report: HookReport::default(),
-            metadata: Value::Object(Map::new()),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PromptMutationState {
-    prompt: String,
-    model: Option<String>,
-    attachments: Vec<PromptAttachment>,
-    metadata: Value,
-}
-
-impl PromptMutationState {
-    fn from_params(p: &PromptRunParams, metadata: Value) -> Self {
-        Self {
-            prompt: p.prompt.clone(),
-            model: p.model.clone(),
-            attachments: p.attachments.clone(),
-            metadata,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SessionMutationState {
-    model: Option<String>,
-    metadata: Value,
-}
-
-impl SessionMutationState {
-    fn from_thread_start(p: &ThreadStartParams, metadata: Value) -> Self {
-        Self {
-            model: p.model.clone(),
-            metadata,
-        }
-    }
-}
-
-fn now_millis_for_hook_context() -> i64 {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_millis() as i64,
-        Err(_) => 0,
-    }
-}
-
-#[derive(Clone, Copy)]
-struct HookContextInput<'a> {
-    phase: HookPhase,
-    cwd: Option<&'a str>,
-    model: Option<&'a str>,
-    thread_id: Option<&'a str>,
-    turn_id: Option<&'a str>,
-    main_status: Option<&'a str>,
-}
-
-fn build_hook_context(
-    correlation_id: &str,
-    metadata: &Value,
-    input: HookContextInput<'_>,
-) -> HookContext {
-    HookContext {
-        phase: input.phase,
-        thread_id: input.thread_id.map(ToOwned::to_owned),
-        turn_id: input.turn_id.map(ToOwned::to_owned),
-        cwd: input.cwd.map(ToOwned::to_owned),
-        model: input.model.map(ToOwned::to_owned),
-        main_status: input.main_status.map(ToOwned::to_owned),
-        correlation_id: correlation_id.to_owned(),
-        ts_ms: now_millis_for_hook_context(),
-        metadata: metadata.clone(),
-    }
-}
-
-fn resolve_attachment_path(cwd: &str, path: &str) -> PathBuf {
-    let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else {
-        PathBuf::from(cwd).join(path)
-    }
-}
-
-fn hook_attachment_to_prompt_attachment(value: HookAttachment) -> PromptAttachment {
-    match value {
-        HookAttachment::AtPath { path, placeholder } => {
-            PromptAttachment::AtPath { path, placeholder }
-        }
-        HookAttachment::ImageUrl { url } => PromptAttachment::ImageUrl { url },
-        HookAttachment::LocalImage { path } => PromptAttachment::LocalImage { path },
-        HookAttachment::Skill { name, path } => PromptAttachment::Skill { name, path },
-    }
-}
-
-fn ensure_metadata_object(metadata: &mut Value) -> &mut Map<String, Value> {
-    if !metadata.is_object() {
-        *metadata = Value::Object(Map::new());
-    }
-    metadata
-        .as_object_mut()
-        .expect("metadata must be object after normalization")
-}
-
-fn push_validation_issue(
-    report: &mut HookReport,
-    hook_name: &str,
-    phase: HookPhase,
-    message: impl Into<String>,
-) {
-    report.push(HookIssue {
-        hook_name: hook_name.to_owned(),
-        phase,
-        class: HookIssueClass::Validation,
-        message: message.into(),
-    });
-}
-
-fn merge_metadata_delta(
-    metadata: &mut Value,
-    hook_name: &str,
-    phase: HookPhase,
-    delta: Value,
-    report: &mut HookReport,
-) {
-    match delta {
-        Value::Null => {}
-        Value::Object(entries) => {
-            let target = ensure_metadata_object(metadata);
-            for (key, value) in entries {
-                target.insert(key, value);
-            }
-        }
-        _ => push_validation_issue(
-            report,
-            hook_name,
-            phase,
-            "metadata_delta must be null or object",
-        ),
-    }
-}
-
-fn apply_prompt_patch(
-    state: &mut PromptMutationState,
-    cwd: &str,
-    hook_name: &str,
-    phase: HookPhase,
-    patch: HookPatch,
-    report: &mut HookReport,
-) {
-    if let Some(prompt) = patch.prompt_override {
-        state.prompt = prompt;
-    }
-    if let Some(model) = patch.model_override {
-        state.model = Some(model);
-    }
-    for attachment in patch.add_attachments {
-        let prompt_attachment = hook_attachment_to_prompt_attachment(attachment);
-        let valid = match &prompt_attachment {
-            PromptAttachment::AtPath { path, .. }
-            | PromptAttachment::LocalImage { path }
-            | PromptAttachment::Skill { path, .. } => resolve_attachment_path(cwd, path).exists(),
-            PromptAttachment::ImageUrl { .. } => true,
-        };
-        if valid {
-            state.attachments.push(prompt_attachment);
-        } else {
-            push_validation_issue(
-                report,
-                hook_name,
-                phase,
-                "hook attachment path not found; mutation ignored",
-            );
-        }
-    }
-    merge_metadata_delta(
-        &mut state.metadata,
-        hook_name,
-        phase,
-        patch.metadata_delta,
-        report,
-    );
-}
-
-fn apply_session_patch(
-    state: &mut SessionMutationState,
-    hook_name: &str,
-    phase: HookPhase,
-    patch: HookPatch,
-    report: &mut HookReport,
-) {
-    if patch.prompt_override.is_some() {
-        push_validation_issue(
-            report,
-            hook_name,
-            phase,
-            "prompt_override is not allowed in PreSessionStart",
-        );
-    }
-    if !patch.add_attachments.is_empty() {
-        push_validation_issue(
-            report,
-            hook_name,
-            phase,
-            "add_attachments is not allowed in PreSessionStart",
-        );
-    }
-    if let Some(model) = patch.model_override {
-        state.model = Some(model);
-    }
-    merge_metadata_delta(
-        &mut state.metadata,
-        hook_name,
-        phase,
-        patch.metadata_delta,
-        report,
-    );
-}
-
-fn apply_pre_hook_actions_to_prompt(
-    state: &mut PromptMutationState,
-    cwd: &str,
-    phase: HookPhase,
-    decisions: Vec<PreHookDecision>,
-    report: &mut HookReport,
-) {
-    for decision in decisions {
-        match decision.action {
-            HookAction::Noop => {}
-            HookAction::Mutate(patch) => apply_prompt_patch(
-                state,
-                cwd,
-                decision.hook_name.as_str(),
-                phase,
-                patch,
-                report,
-            ),
-        }
-    }
-}
-
-fn apply_pre_hook_actions_to_session(
-    state: &mut SessionMutationState,
-    phase: HookPhase,
-    decisions: Vec<PreHookDecision>,
-    report: &mut HookReport,
-) {
-    for decision in decisions {
-        match decision.action {
-            HookAction::Noop => {}
-            HookAction::Mutate(patch) => {
-                apply_session_patch(state, decision.hook_name.as_str(), phase, patch, report)
-            }
-        }
-    }
-}
-
-fn result_status<T, E>(result: &Result<T, E>) -> &'static str {
-    if result.is_ok() {
-        "ok"
-    } else {
-        "error"
     }
 }
 
@@ -1175,6 +651,7 @@ impl Runtime {
     }
 
     async fn thread_start_raw(&self, p: ThreadStartParams) -> Result<ThreadHandle, RpcError> {
+        validate_thread_start_security(&p)?;
         let response = self
             .call_raw("thread/start", thread_start_params_to_wire(&p))
             .await?;
@@ -1261,6 +738,7 @@ impl Runtime {
         thread_id: &str,
         p: ThreadStartParams,
     ) -> Result<ThreadHandle, RpcError> {
+        validate_thread_start_security(&p)?;
         let mut params = Map::<String, Value>::new();
         params.insert("threadId".to_owned(), Value::String(thread_id.to_owned()));
         let overrides = thread_overrides_to_wire(&p);
@@ -1271,7 +749,16 @@ impl Runtime {
         let response = self
             .call_raw("thread/resume", Value::Object(params))
             .await?;
-        let resumed = parse_thread_id(&response).unwrap_or_else(|| thread_id.to_owned());
+        let resumed = parse_thread_id(&response).ok_or_else(|| {
+            RpcError::InvalidRequest(format!(
+                "thread/resume missing thread id in result: {response}"
+            ))
+        })?;
+        if resumed != thread_id {
+            return Err(RpcError::InvalidRequest(format!(
+                "thread/resume returned mismatched thread id: requested={thread_id} actual={resumed}"
+            )));
+        }
         Ok(ThreadHandle {
             thread_id: resumed,
             runtime: self.clone(),
@@ -1399,6 +886,7 @@ impl Runtime {
                     cwd: Some(p.cwd.clone()),
                     approval_policy: Some(p.approval_policy),
                     sandbox_policy: Some(p.sandbox_policy.clone()),
+                    privileged_escalation_approved: p.privileged_escalation_approved,
                 })
                 .await?;
             return self
@@ -1443,6 +931,7 @@ impl Runtime {
                         cwd: Some(p.cwd.clone()),
                         approval_policy: Some(p.approval_policy),
                         sandbox_policy: Some(p.sandbox_policy.clone()),
+                        privileged_escalation_approved: p.privileged_escalation_approved,
                     })
                     .await?;
                 self.run_prompt_on_thread(thread, p, effort, Some(&mut hook_state), scoped_hooks)
@@ -1498,6 +987,7 @@ impl Runtime {
                         cwd: Some(p.cwd.clone()),
                         approval_policy: Some(p.approval_policy),
                         sandbox_policy: Some(p.sandbox_policy.clone()),
+                        privileged_escalation_approved: p.privileged_escalation_approved,
                     },
                 )
                 .await?;
@@ -1545,6 +1035,7 @@ impl Runtime {
                             cwd: Some(p.cwd.clone()),
                             approval_policy: Some(p.approval_policy),
                             sandbox_policy: Some(p.sandbox_policy.clone()),
+                            privileged_escalation_approved: p.privileged_escalation_approved,
                         },
                     )
                     .await?;
@@ -1621,6 +1112,7 @@ impl Runtime {
                 cwd: Some(p.cwd.clone()),
                 approval_policy: Some(p.approval_policy),
                 sandbox_policy: Some(p.sandbox_policy),
+                privileged_escalation_approved: p.privileged_escalation_approved,
                 model,
                 effort: Some(effort),
                 summary: None,
@@ -1632,6 +1124,7 @@ impl Runtime {
                 post_turn_id = Some(turn.turn_id.clone());
                 let mut collector = AssistantTextCollector::new();
                 let mut last_turn_error: Option<PromptTurnErrorSignal> = None;
+                let mut lagged_completed_text: Option<String> = None;
                 let deadline = Instant::now() + p.timeout;
                 let terminal = loop {
                     let now = Instant::now();
@@ -1643,7 +1136,40 @@ impl Runtime {
 
                     let envelope = match timeout(remaining, live_rx.recv()).await {
                         Ok(Ok(v)) => v,
-                        Ok(Err(RecvError::Lagged(_))) => continue,
+                        Ok(Err(RecvError::Lagged(_))) => {
+                            match self
+                                .read_turn_terminal_after_lag(&thread.thread_id, &turn.turn_id)
+                                .await
+                            {
+                                Ok(Some(LaggedTurnTerminal::Completed { assistant_text })) => {
+                                    lagged_completed_text = assistant_text;
+                                    break Ok(());
+                                }
+                                Ok(Some(LaggedTurnTerminal::Failed { message })) => {
+                                    if let Some(err) = last_turn_error.clone() {
+                                        break Err(PromptRunError::TurnFailedWithContext(
+                                            err.into_failure(PromptTurnTerminalState::Failed),
+                                        ));
+                                    }
+                                    if let Some(message) = message {
+                                        break Err(PromptRunError::TurnFailedWithContext(
+                                            PromptTurnFailure {
+                                                terminal_state: PromptTurnTerminalState::Failed,
+                                                source_method: "thread/read".to_owned(),
+                                                code: None,
+                                                message,
+                                            },
+                                        ));
+                                    }
+                                    break Err(PromptRunError::TurnFailed);
+                                }
+                                Ok(Some(LaggedTurnTerminal::Interrupted)) => {
+                                    break Err(PromptRunError::TurnInterrupted);
+                                }
+                                Ok(None) => continue,
+                                Err(err) => break Err(PromptRunError::Rpc(err)),
+                            }
+                        }
                         Ok(Err(RecvError::Closed)) => {
                             break Err(PromptRunError::Runtime(RuntimeError::Internal(format!(
                                 "live stream closed: {}",
@@ -1686,7 +1212,15 @@ impl Runtime {
                 match terminal {
                     Err(err) => Err(err),
                     Ok(()) => {
-                        let assistant_text = collector.into_text();
+                        let assistant_text = if let Some(snapshot_text) = lagged_completed_text {
+                            if snapshot_text.trim().is_empty() {
+                                collector.into_text()
+                            } else {
+                                snapshot_text
+                            }
+                        } else {
+                            collector.into_text()
+                        };
                         let assistant_text = assistant_text.trim().to_owned();
                         if assistant_text.is_empty() {
                             if let Some(err) = last_turn_error {
@@ -1730,6 +1264,35 @@ impl Runtime {
         run_result
     }
 
+    async fn read_turn_terminal_after_lag(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<LaggedTurnTerminal>, RpcError> {
+        let response = self
+            .thread_read(ThreadReadParams {
+                thread_id: thread_id.to_owned(),
+                include_turns: Some(true),
+            })
+            .await?;
+
+        let Some(turn) = response.thread.turns.iter().find(|turn| turn.id == turn_id) else {
+            return Ok(None);
+        };
+
+        let terminal = match turn.status {
+            ThreadTurnStatus::Completed => Some(LaggedTurnTerminal::Completed {
+                assistant_text: extract_assistant_text_from_turn(turn),
+            }),
+            ThreadTurnStatus::Failed => Some(LaggedTurnTerminal::Failed {
+                message: turn.error.as_ref().map(|error| error.message.clone()),
+            }),
+            ThreadTurnStatus::Interrupted => Some(LaggedTurnTerminal::Interrupted),
+            ThreadTurnStatus::InProgress => None,
+        };
+        Ok(terminal)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn execute_pre_hook_phase(
         &self,
@@ -1771,26 +1334,6 @@ impl Runtime {
         self.run_post_hooks_with(&ctx, &mut hook_state.report, scoped_hooks)
             .await;
     }
-}
-
-fn interrupt_turn_best_effort(thread: &ThreadHandle, turn_id: &str) {
-    const INTERRUPT_RPC_TIMEOUT: Duration = Duration::from_millis(500);
-
-    let runtime = thread.runtime().clone();
-    let thread_id = thread.thread_id.clone();
-    let turn_id = turn_id.to_owned();
-    tokio::spawn(async move {
-        let mut params = Map::<String, Value>::new();
-        params.insert("threadId".to_owned(), Value::String(thread_id));
-        params.insert("turnId".to_owned(), Value::String(turn_id));
-        let _ = runtime
-            .call_raw_with_timeout(
-                "turn/interrupt",
-                Value::Object(params),
-                INTERRUPT_RPC_TIMEOUT,
-            )
-            .await;
-    });
 }
 
 #[cfg(test)]

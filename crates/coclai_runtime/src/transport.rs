@@ -124,11 +124,11 @@ impl StdioTransport {
         })
     }
 
-    pub fn write_tx(&self) -> mpsc::Sender<Value> {
+    pub fn write_tx(&self) -> Result<mpsc::Sender<Value>, RuntimeError> {
         self.write_tx
             .as_ref()
-            .expect("write sender missing from transport")
-            .clone()
+            .cloned()
+            .ok_or_else(|| RuntimeError::Internal("write sender missing from transport".to_owned()))
     }
 
     pub fn take_read_rx(&mut self) -> Result<mpsc::Receiver<Value>, RuntimeError> {
@@ -421,7 +421,7 @@ mod tests {
                 .await
                 .expect("spawn");
         let mut read_rx = transport.take_read_rx().expect("take rx");
-        let write_tx = transport.write_tx();
+        let write_tx = transport.write_tx().expect("take tx");
 
         write_tx
             .send(json!({"method":"ping","params":{"n":1}}))

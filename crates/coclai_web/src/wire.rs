@@ -37,7 +37,23 @@ impl ApprovalResponsePayload {
 }
 
 pub(super) fn serialize_sse_envelope(envelope: &Envelope) -> Result<String, WebError> {
-    serde_json::to_string(envelope)
+    let mut value =
+        serde_json::to_value(envelope).map_err(|e| WebError::Internal(e.to_string()))?;
+    redact_internal_identifiers(&mut value);
+    serde_json::to_string(&value)
         .map(|json| format!("data: {json}\n\n"))
         .map_err(|e| WebError::Internal(e.to_string()))
+}
+
+fn redact_internal_identifiers(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    obj.remove("rpcId");
+    let kind = obj.get("kind").and_then(Value::as_str);
+    if matches!(kind, Some("response" | "unknown")) {
+        if let Some(json_obj) = obj.get_mut("json").and_then(Value::as_object_mut) {
+            json_obj.remove("id");
+        }
+    }
 }

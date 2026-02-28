@@ -2,6 +2,9 @@
 name = "coclai_plugin_core"
 version = "0.1.4"
 edition = "2021"
+description = "Shared plugin and hook contract types for coclai crates."
+license = "MIT"
+repository = "https://github.com/AxiomOrient/coclai"
 
 [dependencies]
 serde.workspace = true

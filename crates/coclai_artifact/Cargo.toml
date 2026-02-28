@@ -2,6 +2,9 @@
 name = "coclai_artifact"
 version = "0.1.4"
 edition = "2021"
+description = "Artifact orchestration and patch/store adapter for coclai."
+license = "MIT"
+repository = "https://github.com/AxiomOrient/coclai"
 
 [dependencies]
 serde.workspace = true

@@ -2,6 +2,9 @@
 name = "coclai_runtime"
 version = "0.1.4"
 edition = "2021"
+description = "Runtime, transport, and JSON-RPC contract layer for coclai."
+license = "MIT"
+repository = "https://github.com/AxiomOrient/coclai"
 
 [dependencies]
 coclai_plugin_core = { version = "0.1.4", path = "../coclai_plugin_core" }

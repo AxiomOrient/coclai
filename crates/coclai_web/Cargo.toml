@@ -2,6 +2,9 @@
 name = "coclai_web"
 version = "0.1.4"
 edition = "2021"
+description = "Web/session adapter and approval routing layer for coclai runtime."
+license = "MIT"
+repository = "https://github.com/AxiomOrient/coclai"
 
 [dependencies]
 serde.workspace = true

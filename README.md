@@ -422,7 +422,7 @@ cargo test --workspace
 - Core API: `Docs/CORE_API.md`
 - Schema & Contract: `Docs/SCHEMA_AND_CONTRACT.md`
 - Security: `Docs/SECURITY.md`
-- Analysis Reports: `Docs/analysis/*`
+- Analysis Contract Matrix: `Docs/analysis/CONTRACT-MATRIX.md`
 
 ---
 

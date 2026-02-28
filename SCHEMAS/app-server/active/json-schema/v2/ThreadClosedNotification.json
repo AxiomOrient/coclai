@@ -1,16 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "SkillRequestApprovalParams",
+  "title": "ThreadClosedNotification",
   "type": "object",
   "required": [
-    "itemId",
-    "skillName"
+    "threadId"
   ],
   "properties": {
-    "itemId": {
-      "type": "string"
-    },
-    "skillName": {
+    "threadId": {
       "type": "string"
     }
   }

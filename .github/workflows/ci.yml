@@ -25,5 +25,14 @@ jobs:
       - name: schema manifest
         run: bash scripts/check_schema_manifest.sh
 
+      - name: product hygiene
+        run: bash scripts/check_product_hygiene.sh
+
+      - name: doc contract sync
+        run: COCLAI_DOC_SYNC_MODE=hard COCLAI_DOC_SYNC_FAIL_ON_MISMATCH=1 bash scripts/check_doc_contract_sync.sh
+
+      - name: schema drift
+        run: COCLAI_SCHEMA_DRIFT_MODE=hard COCLAI_SCHEMA_DRIFT_SOURCE=${COCLAI_CI_SCHEMA_DRIFT_SOURCE:-codex} bash scripts/check_schema_drift.sh
+
       - name: script smoke harness
         run: bash scripts/smoke_script_harness.sh

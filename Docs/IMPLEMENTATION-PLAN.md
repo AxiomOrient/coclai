@@ -1,296 +1,300 @@
-# IMPLEMENTATION-PLAN
+# IMPLEMENTATION PLAN (Big-Bang Rewrite)
+
+작성일: 2026-02-28
+전략: Runtime/Web/Artifact 빅뱅 재작성
 
 ## Goal
 
-`/Users/axient/repository/codex`의 app-server 문서/구현체와 현재 `coclai` 래퍼를 A→Z로 분해 분석하여, 다음 질문에 증거 기반으로 답한다.
+`runtime/web/artifact` 구조를 단일 컷오버 방식으로 재작성하여 다음을 동시에 달성한다.
 
-1. 현재 설계/구조/기능이 최선인가?
-2. 사용성을 더 높이는 대안 구조가 무엇인가?
-3. 동작 보존(behavior-preserving) 전제에서 어떤 리팩터 순서가 가장 안전한가?
+1. 공개 API(`coclai::quick_run`, `Workflow`, `AppServer`, `coclai_runtime` 공개 타입) 호환성을 유지한다.
+2. 내부 구조를 책임 단위로 재배치해 유지보수성과 변경 안정성을 높인다.
+3. 재작성 완료 시점에 기능 회귀/계약 위반/보안 회귀가 없음을 증거 기반으로 입증한다.
 
 완료 기준:
-- 모든 `coclai` 문서/크레이트를 빠짐없이 분해한 분석 산출물 확보
-- 최소 3개 아키텍처 옵션 비교 및 1개 권고안 도출
-- 행동 불변식 + 의존성 규칙 + 원자적 리팩터 단계(2~6개) 확정
+- 전체 워크스페이스 테스트/정적 점검/릴리즈 프리플라이트 통과
+- 공개 API snapshot diff 0
+- `stub/TODO/unimplemented!/todo!()` 신규 잔존 0
+- `runtime -> web|artifact` 역의존 0
 
 ## Scope
 
 포함:
-- `coclai` 전체: `README.md`, `Docs/*`, `scripts/*`, `SCHEMAS/*`, `crates/*`
-- 업스트림 기준선: `/Users/axient/repository/codex/codex-rs/app-server/README.md`, `/Users/axient/repository/codex/AGENTS.md`, `/Users/axient/repository/codex/codex-rs/app-server-protocol/*`
+- `crates/coclai_runtime/src/**`
+- `crates/coclai_web/src/**`
+- `crates/coclai_artifact/src/**`
+- `crates/coclai/src/{lib.rs,ergonomic.rs,appserver.rs}`
+- `.github/workflows/ci.yml`, `scripts/{release_preflight.sh,check_*}`
+- `README.md`, `Docs/CORE_API.md`, `Docs/SCHEMA_AND_CONTRACT.md`, `Docs/ARCHITECTURE.md`
 
-제외(이번 단계):
-- 실제 코드 리팩터 구현
-- API breaking change 반영
-- 배포/릴리즈 실행
+제외:
+- 신규 기능 추가
+- 공개 API breaking change
+- 신규 crate 도입
+- 모델/프롬프트 정책 변경
 
 ## Constraints
 
-- 계획/분석 우선: 구현 변경 전에 증거 축적과 의사결정 게이트를 통과해야 함
-- 동작 보존 우선: 기존 공개 API/기본 동작은 분석 기간 중 변경하지 않음
-- 불확실 결론은 `uncertain`로 표기하고 가장 저비용 검증 절차를 같이 명시
-- 분석 산출물은 재현 가능한 명령/파일 증거를 포함해야 함
+- 사용자 지시사항 고정: 단계적 전환이 아니라 **빅뱅 컷오버**로 진행
+- 구현 단계에서 임시 우회 코드(stub/feature-flag fallback) 금지
+- 모든 변경은 재작성 브랜치에서 통합 후 단일 컷오버
+- 병합 전 증거 없는 가정 금지(테스트/로그/명령 결과 필요)
+- 과잉설계 금지: 추상화는 최소 2개 실사용 경로가 있을 때만 도입
 
 ## Data Model
 
-### Problem
+현재 구조 관찰(증거 기반):
+- 런타임 고복잡도 파일 집중
+  - `api.rs` 1340 LOC
+  - `runtime.rs` 598 LOC
+  - `state.rs` 720 LOC
+- 어댑터 고복잡도 파일 집중
+  - `coclai_web/src/lib.rs` 387 LOC
+  - `coclai_artifact/src/lib.rs` 466 LOC
+- 의존 방향은 현재 양호
+  - `coclai_web -> coclai_runtime`
+  - `coclai_artifact -> coclai_runtime`
 
-`coclai`는 app-server 래핑 라이브러리로서 이미 런타임/도메인/웹 어댑터를 갖고 있지만, 실제 사용성 관점(메서드 커버리지, API 인지 부하, 업스트림 드리프트 대응, 모듈 경계 유지보수성)에서 최적 구조인지 아직 검증되지 않았다.
+재작성 목표 모델:
+- Runtime: API 파사드 / 실행 코어 / 상태 리듀서 / transport/rpc 경계를 명시 분리
+- Web: 세션/턴/승인 라우팅 분리 + tenant ownership 규칙 명시
+- Artifact: lifecycle/orchestration/store/patch 책임 분리
+- Facade: 초보자 경로와 고급 경로를 동일 코드베이스에서 동시 제공
 
-### Evidence Baseline
+## Option Comparison (3)
 
-- 워크스페이스 구성: 5 crates (`coclai`, `coclai_runtime`, `coclai_plugin_core`, `coclai_artifact`, `coclai_web`)
-  - 근거: `/Users/axient/repository/coclai/Cargo.toml`, `cargo metadata --no-deps`
-- 복잡도 집중:
-  - `coclai_runtime/src/api.rs` 1906 LOC
-  - `coclai_runtime/src/client.rs` 1032 LOC
-  - `coclai_runtime/src/runtime.rs` 664 LOC
-  - 근거: `wc -l` 집계
-- 현재 래퍼 공개 RPC 상수: 10개 메서드(`thread/*` 일부 + `turn/start`, `turn/interrupt`)
-  - 근거: `/Users/axient/repository/coclai/crates/coclai/src/appserver.rs`
-- 업스트림 app-server 메서드 표면은 더 넓음(`turn/steer`, `model/list`, `skills/list`, `config/*`, `tool/requestUserInput` 등)
-  - 근거: `/Users/axient/repository/codex/codex-rs/app-server/README.md`
-- 테스트 분포: 테스트 마커 약 108개, 계약/실클라이언트/soak 포함
-  - 근거: `rg "#[test]|#[tokio::test]|mod tests"`
+### Option A. 유지보수 중심 점진 개선
+- 장점: 리스크 낮음
+- 단점: 사용자가 요구한 빅뱅 전략과 불일치
 
-### Hypotheses (with falsification)
+### Option B. 빅뱅 재작성(채택)
+- 장점: 구조 일관성을 한 번에 확보, 중간 상태 복잡도 최소화
+- 단점: 통합 리스크가 큼, 테스트/게이트 실패 시 롤백 비용 큼
 
-H1. `AppServer` 표면(10개 고정 상수 + known method validator)이 실제 사용성 병목이다.
-- 반증 절차:
-  1. 업스트림 메서드 인벤토리 추출
-  2. `appserver.rs`/`rpc_contract.rs` 지원 목록과 diff
-  3. 의도적 미지원인지(정책) vs 누락인지(결함) 분류
+### Option C. 신규 병행 구현 후 장기 이중운영
+- 장점: 안정적 전환
+- 단점: 중복 코드/운영비 증가, 과잉설계 위험
 
-H2. `coclai_runtime`의 대형 파일 구조(`api.rs`, `client.rs`)가 변경 파급 범위를 키운다.
-- 반증 절차:
-  1. 공개 타입/함수 변경 시 영향 경로 추적
-  2. 테스트 모듈 의존 분포 계량
-  3. 파일 분할 가상 시나리오로 빌드/테스트 영향 비교
+## Decision
 
-H3. 문서 계약(`README`/`Docs/*`)과 구현 계약(`rpc_contract`, `api`, `client`) 사이에 드리프트가 누적되어 있다.
-- 반증 절차:
-  1. 문서 선언(지원 메서드/보장 규칙) 추출
-  2. 구현체의 실제 검사/에러 규칙과 1:1 매핑
-  3. 불일치 항목을 유형별(문서 과장/구현 누락/버전차)로 분류
+`Option B (빅뱅 재작성)`을 채택한다.
 
-H4. `artifact`/`web` 어댑터는 C-lite 계약 분리에 성공했지만, 런타임 내부 타입 노출로 결합도가 여전히 높다.
-- 반증 절차:
-  1. 어댑터 trait에 runtime 타입 누수 여부 점검
-  2. cross-crate import 경계 점검
-  3. 계약 버전 불일치 처리 경로의 일관성 검증
+채택 이유:
+- 사용자 요구사항이 빅뱅 전략을 명시했고, 본 계획은 해당 제약을 만족해야 한다.
+- 현재 테스트/검증 스크립트 자산이 충분하여 컷오버 품질 게이트를 강하게 설정할 수 있다.
+- 단계적 전환 중간상태 비용(이중 경로 유지)을 제거할 수 있다.
 
-### Options (3)
+## Target File Cut Map (Big-Bang)
 
-Option A: 빅뱅 재구조화(대규모 즉시 리팩터)
-- 장점: 단기간 구조 통일 가능
-- 단점: 리스크/회귀 범위가 너무 큼, 원인 분리 어려움
+Runtime (`crates/coclai_runtime/src`):
+- `api.rs`(public facade + type contracts) + `api/{flow.rs,models.rs,ops.rs,wire.rs,turn_error.rs}`
+- `runtime.rs`(runtime core facade) + `runtime/{dispatch.rs,lifecycle.rs,rpc_io.rs,state_projection.rs,supervisor.rs,tests.rs}`
+- `state.rs`(state model + reducer + prune 경계 유지)
+- 유지: `rpc.rs`, `rpc_contract.rs`, `transport.rs`, `turn_output.rs`, `hooks.rs`, `metrics.rs`, `approvals.rs`
 
-Option B: 현 구조 유지 + 문서만 보강
-- 장점: 비용 낮음
-- 단점: 사용성 병목과 드리프트 구조 문제를 해결하지 못함
+Web (`crates/coclai_web/src`):
+- `lib.rs` -> `lib.rs(파사드)` + `session_service.rs` + `turn_service.rs` + `approval_service.rs`
+- 유지: `adapter.rs`, `routing.rs`, `state.rs`, `wire.rs`, `tests.rs`
 
-Option C (권고): 계약-우선 단계적 분해 + 동작 보존 리팩터
-- 장점: 증거 기반으로 리스크를 통제하며 개선 가능
-- 단점: 초기 분석 비용이 큼
+Artifact (`crates/coclai_artifact/src`):
+- `lib.rs` -> `lib.rs(파사드 + 도메인 모델)` + `orchestrator.rs`
+- 유지: `adapter.rs`, `patch.rs`, `store.rs`, `task.rs`, `tests.rs`
 
-### Decision
-
-권고안은 **Option C**.  
-이유: 현재 코드베이스는 계약/테스트 자산이 이미 풍부하므로, 이를 기준선으로 삼아 단계적 분해를 수행할 때 정확도와 안전성을 동시에 확보할 수 있다.
-
-## Behavior Invariants
-
-아래는 리팩터 전후 반드시 유지해야 하는 불변식이다.
-
-1. 세션 라이프사이클: `connect -> setup/run -> ask -> close -> shutdown` 호출 의미 보존
-2. 기본 보안값: `approval=never`, `sandbox=readOnly` 경로 보존
-3. 계약 검증 모드 기본값: `RpcValidationMode::KnownMethods` 보존
-4. `Session::close()` 후 핸들 재사용 거절 동작 보존
-5. 훅 실패 fail-open 정책 + `HookReport` 누적 동작 보존
-6. 스키마 가드/manifest fail-fast 동작 보존
-
-## Target Dependency Rules
-
-목표 의존성 규칙(방향 고정):
-
-1. `coclai` -> `coclai_runtime` (facade only)
-2. `coclai_runtime` -> `coclai_plugin_core` (hook contract only)
-3. `coclai_artifact` -> `coclai_runtime` + own domain modules
-4. `coclai_web` -> `coclai_runtime` + own adapter/state modules
-5. `coclai_runtime`는 `artifact/web`를 참조하지 않는다(역의존 금지)
+Coclai Facade (`crates/coclai/src`):
+- 유지: `lib.rs`, `ergonomic.rs`, `appserver.rs` (시그니처 불변 원칙)
 
 ## Execution Phases
 
-### Phase 0. 기준선 고정
+### Phase B0. Freeze & Baseline
+- 목표: 재작성 기준선 고정
+- 작업:
+  - 공개 API/문서/테스트 baseline snapshot 생성
+  - 스키마/매니페스트/문서 동기화 상태 고정
+- TASK-ID: `BB-001`, `BB-002`, `BB-003`, `BB-021`
+- 검증:
+  - `cargo test --workspace`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `./scripts/release_preflight.sh`
+  - `./scripts/check_doc_contract_sync.sh`
+  - `./scripts/check_schema_manifest.sh`
+  - `COCLAI_SCHEMA_DRIFT_MODE=hard COCLAI_SCHEMA_DRIFT_SOURCE=codex ./scripts/check_schema_drift.sh`
+  - `rg -n "check_product_hygiene.sh|check_doc_contract_sync.sh|check_schema_drift.sh" .github/workflows/ci.yml`
 
-- 목적: 분석 입력을 고정하고 재현 가능한 인벤토리 확보
-- TASK-ID: `T-010`, `T-011`, `T-012`
-- 산출물: `Docs/analysis/EVIDENCE-MAP.md#phase-0-baseline-evidence`
-- 좁은 검증: 파일/LOC/의존성/메서드 목록이 명령 결과와 일치
+### Phase B1. Big-Bang Architecture Spec Lock
+- 목표: 재작성 대상 파일/모듈 경계를 확정
+- 작업:
+  - Runtime/Web/Artifact 목표 모듈 구조도 확정
+  - 공개 API 호환 규칙 및 금지사항 확정
+- TASK-ID: `BB-004`, `BB-005`, `BB-006`
+- 검증:
+  - 문서 내 Target File Cut Map, 금지사항, 롤백 규칙 존재 확인
+  - `rg -n "## Target File Cut Map|## Constraints|## Risk/Rollback" Docs/IMPLEMENTATION-PLAN.md`
 
-### Phase 1. 문서 분해 분석
+### Phase B2. Runtime Rewrite (In Branch)
+- 목표: 런타임 코어 재작성 완료
+- 작업:
+  - API/Runtime/State 구조 재편
+  - contract/rpc/state reducer 동등 동작 보장
+- TASK-ID: `BB-007`, `BB-008`, `BB-009`
+- 검증:
+  - `cargo test -p coclai_runtime --lib --tests`
+  - `cargo test -p coclai_runtime --test contract_deterministic`
+  - `cargo test -p coclai_runtime --test classify_fixtures`
+  - `rg -n "coclai_web|coclai_artifact" crates/coclai_runtime/src` 결과 0건
 
-- 목적: README + docs 계약 문장을 구조화 데이터로 변환
-- TASK-ID: `T-020`, `T-021`, `T-022`
-- 산출물:
-  - `Docs/analysis/CONTRACT-MATRIX.md`
-  - `Docs/analysis/EVIDENCE-MAP.md#phase-1-contract-evidence`
-- 좁은 검증: 문서 선언 항목별 구현 참조 경로 1개 이상 연결
+### Phase B3. Adapter Rewrite (Web + Artifact)
+- 목표: web/artifact 재작성 완료
+- 작업:
+  - web 세션/턴/approval 라우팅 재편
+  - artifact manager/orchestrator/store 경계 재편
+- TASK-ID: `BB-010`, `BB-011`, `BB-012`
+- 검증:
+  - `cargo test -p coclai_web --lib`
+  - `cargo test -p coclai_artifact --lib`
+  - cross-tenant/approval ownership, conflict/revision 관련 테스트 케이스 전부 pass
 
-### Phase 2. 런타임 코어 분해 분석
+### Phase B4. Facade Compatibility Rebind
+- 목표: 초보자/고급 사용자 진입점 동작 보존
+- 작업:
+  - `coclai` 파사드 리바인딩
+  - 예제/문서/API 매핑 업데이트
+- TASK-ID: `BB-013`, `BB-014`
+- 검증:
+  - `cargo test --workspace`
+  - API snapshot diff 0 (`README.md`, `Docs/CORE_API.md`, facade exports 비교)
+  - `./scripts/check_doc_contract_sync.sh`
 
-- 목적: `runtime/client/api/rpc/state`의 책임·경계·복잡도 맵 작성
-- TASK-ID: `T-030`, `T-031`, `T-032`, `T-033`, `T-034`
-- 산출물: `Docs/analysis/EVIDENCE-MAP.md#phase-2-runtime-evidence`
-- 좁은 검증: 모듈별 입력/출력/부수효과 표가 코드와 일치
-
-### Phase 3. 파사드/사용성 분해 분석
-
-- 목적: `AppServer`, `Workflow`, `quick_run` 사용성 병목과 누락 경로 식별
-- TASK-ID: `T-040`, `T-041`, `T-042`
-- 산출물: `Docs/analysis/EVIDENCE-MAP.md#phase-3-usability-evidence`
-- 좁은 검증: 업스트림 메서드 대비 지원 갭 테이블 완성
-
-### Phase 4. 어댑터/경계 분석
-
-- 목적: `artifact/web/plugin_core` 계약 분리 수준과 안전성 점검
-- TASK-ID: `T-050`, `T-051`, `T-052`
-- 산출물: `Docs/analysis/EVIDENCE-MAP.md#phase-4-adapter-evidence`
-- 좁은 검증: tenant/approval/contract mismatch 경로 재현 시나리오 작성
-
-### Phase 5. 품질 게이트 분석
-
-- 목적: 테스트/성능/스키마 파이프라인의 신뢰도와 공백 확인
-- TASK-ID: `T-060`, `T-061`, `T-062`
-- 산출물: `Docs/analysis/EVIDENCE-MAP.md#phase-5-quality-evidence`
-- 좁은 검증: 각 게이트의 실패 시나리오와 탐지 가능성 매핑
-
-### Phase 6. 대안 비교 + 리팩터 설계
-
-- 목적: 구조 개선 옵션 비교 후 원자적 단계 설계
-- TASK-ID: `T-070`, `T-071`, `T-072`
-- 산출물: `Docs/analysis/EVIDENCE-MAP.md#phase-6-options-evidence`
-- 좁은 검증: 옵션별 비용/리스크/가시성 점수 + 선택 근거 명시
-
-### Phase 7. 최종 권고안 확정
-
-- 목적: A→Z 분석 결과를 최종 권고안과 실행백로그로 수렴
-- TASK-ID: `T-073`, `T-080`
-- 산출물:
-  - `Docs/analysis/FINAL-ANALYSIS-REPORT.md`
-  - `Docs/analysis/NEXT-ACTIONS.md`
-- 좁은 검증: 모든 TASK-ID가 근거 파일과 1:1 연결
-
-### Phase 8. 외부 공개 릴리즈 하드닝
-
-- 목적: 외부 공개 전에 실패율/보안/계약 가시성을 높이는 최소 수정 적용
-- TASK-ID: `T-109`, `T-110`, `T-111`
-- 산출물:
-  - `crates/coclai/examples/workflow.rs`
-  - `crates/coclai/examples/workflow_privileged.rs`
-  - `crates/coclai/examples/rpc_direct.rs`
-  - `scripts/release_preflight.sh`
-  - `README.md`, `Docs/CORE_API.md`, `Docs/SCHEMA_AND_CONTRACT.md`
-- 좁은 검증:
-  1. `workflow` safe default가 추가 플래그 없이 실행됨
-  2. `workflow_privileged`는 explicit opt-in(`allow_privileged_escalation`) 경로를 제공함
-  3. `rpc_direct`가 `turn/completed`까지 대기 후 최종 텍스트를 출력함
-  4. preflight의 schema drift gate가 `hard` 모드에서 실패를 차단함
-
-## Atomic Refactor Steps (Behavior-Preserving, 2~6)
-
-아래 6개는 **구현 승인 후** 수행할 원자 단계 제안이다.
-
-1. RPC 메서드 카탈로그 단일화(`appserver.rs` 상수 + `rpc_contract.rs` known-method 동기화)
-- 검증: 기존 10개 메서드 회귀 테스트 + 누락/중복 diff 0
-- 롤백: 기존 수동 상수/검증 로직으로 즉시 복원
-
-2. `api.rs` 분할(`models`, `thread_ops`, `turn_ops`, `run_flow`)
-- 검증: 공개 re-export 경로/타입 시그니처 불변
-- 롤백: 모듈 분할 revert(인터페이스 변경 없음)
-
-3. `client.rs` 분할(`config`, `session`, `compat_guard`, `run_profile`)
-- 검증: `Client::*` 공개 API snapshot 일치
-- 롤백: 파일 병합 revert
-
-4. 런타임 핸드셰이크/재시작 상태머신 격리(`runtime/lifecycle`, `runtime/supervisor`)
-- 검증: handshaking/restart 실패 경로 테스트 유지
-- 롤백: 기존 진입점 경로로 재연결
-
-5. 업스트림 스키마/메서드 드리프트 자동 감지 스크립트 추가
-- 검증: 샘플 드리프트 주입 시 CI 실패
-- 롤백: 드리프트 체크를 non-blocking 모드로 전환
-
-6. 문서-코드 계약 동기화 파이프라인 확립(`README`/`Docs/*` 자동 체크리스트)
-- 검증: 체크리스트에서 선언-구현 링크 100% 채움
-- 롤백: 수동 검토 플로우로 임시 복귀
+### Phase B5. System Verification & Cutover
+- 목표: 통합 검증 통과 후 단일 컷오버
+- 작업:
+  - workspace 통합 테스트 + 품질 게이트 + preflight
+  - 성능/안정성 회귀 점검
+  - 롤백 패키지 준비 후 컷오버
+- TASK-ID: `BB-015`, `BB-016`, `BB-017`, `BB-018`, `BB-019`, `BB-020`
+- 검증:
+  - `./scripts/release_preflight.sh`
+  - `./scripts/run_micro_bench.sh`
+  - `./scripts/run_nightly_opt_in_gate.sh`
+  - `rg -n "todo!\\(|unimplemented!\\(" crates` 결과 0건
+  - `rg -n "TODO" crates --glob '!**/tests/fixtures/**'` 결과 0건
 
 ## Verification Strategy
 
-분석 단계별 공통 검증:
+1. 컴파일/테스트
+- `cargo test --workspace`
+- `cargo test -p coclai_runtime --test contract_deterministic`
+- `cargo test -p coclai_runtime --test classify_fixtures`
+- `cargo test -p coclai_web --lib`
+- `cargo test -p coclai_artifact --lib`
 
-1. 증거 링크 검증: 각 결론마다 최소 1개 파일 근거 또는 재현 절차 포함
-2. 재현 명령 검증: 인벤토리/갭 분석 명령이 동일 결과를 재현
-3. 계약 검증:
-   - `cargo test -p coclai_runtime --test contract_deterministic`
-   - `cargo test -p coclai_runtime --test classify_fixtures`
-   - `./scripts/check_schema_manifest.sh`
-4. 구조 회귀 검증(구현 단계에서):
-   - `cargo test -p coclai --lib`
-   - `cargo test -p coclai_runtime --lib`
-   - `cargo test -p coclai_artifact --lib`
-   - `cargo test -p coclai_web --lib`
-5. 성능 게이트:
-   - `./scripts/run_micro_bench.sh`
-6. 선택적 실CLI 스모크:
-   - `APP_SERVER_CONTRACT=1 cargo test -p coclai_runtime --test contract_real_cli -- --nocapture`
+2. 품질 게이트
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `./scripts/check_product_hygiene.sh`
+- `./scripts/check_doc_contract_sync.sh`
+
+3. 계약/스키마 게이트
+- `./scripts/check_schema_manifest.sh`
+- `COCLAI_SCHEMA_DRIFT_MODE=hard COCLAI_SCHEMA_DRIFT_SOURCE=codex ./scripts/check_schema_drift.sh`
+
+4. 운영/성능
+- `./scripts/run_micro_bench.sh`
+- `./scripts/run_nightly_opt_in_gate.sh`
+- `./scripts/release_preflight.sh`
+
+5. 미구현/임시코드 차단
+- `rg -n "todo!\\(|unimplemented!\\(" crates`
+- `rg -n "TODO" crates --glob '!**/tests/fixtures/**'`
+- 코드 영역에서 발견 시 컷오버 차단
 
 ## Risk/Rollback
 
-주요 리스크:
+Risk 1. 런타임 재작성 후 계약 미세 불일치 발생
+- 완화: contract deterministic + fixture 분류 테스트를 컷오버 필수 게이트로 고정
+- rollback: cutover 전 태그로 즉시 복귀
 
-1. 업스트림 app-server 버전 변화로 분석 결과 조기 노후화
-- 완화: 분석 보고서에 스키마/문서 기준 시점 명시
-- 롤백: 기준 버전 고정 후 재분석
+Risk 2. web ownership 규칙 회귀로 권한 누수
+- 완화: cross-tenant/session 차단 테스트를 P0 게이트로 고정
+- rollback: 컷오버 중단 + 재작성 브랜치 롤백
 
-2. 과도한 파일 분할로 탐색성이 오히려 하락
-- 완화: 단계별 분할 + API 표면 불변 검증
-- 롤백: 분할 단계 단위 revert
+Risk 3. artifact 저장 일관성(revision/conflict) 깨짐
+- 완화: conflict/lock/revision 회귀 테스트 선행
+- rollback: 이전 릴리즈 브랜치로 즉시 리스토어
 
-3. 사용성 개선 시도 중 계약 검증 약화
-- 완화: `KnownMethods` 기본값과 스키마 가드 유지
-- 롤백: strict validation 경로 강제 복귀
-
-4. 웹/도메인 어댑터에서 권한/tenant 경계 누수
-- 완화: approval/session ownership 테스트 우선 강화
-- 롤백: adapter 기능 플래그로 노출 축소
+Risk 4. 빅뱅 병합 직후 운영 장애
+- 완화: 릴리즈 전 smoke + nightly + preflight 동시 통과 필요
+- rollback: hotfix 이전에 전체 리버트 가능하도록 단일 병합 커밋 유지
 
 ## Priority Matrix (Eisenhower)
 
-### Urgent + Important
-- `T-010`, `T-011`, `T-012`, `T-022`, `T-040`, `T-070`
+Urgent + Important:
+- `BB-001`, `BB-002`, `BB-004`, `BB-007`, `BB-010`, `BB-015`, `BB-017`, `BB-019`, `BB-020`, `BB-021`
 
-### Important, Not Urgent
-- `T-031`, `T-032`, `T-033`, `T-034`, `T-041`, `T-071`, `T-072`
+Important, Not Urgent:
+- `BB-003`, `BB-005`, `BB-006`, `BB-008`, `BB-009`, `BB-011`, `BB-012`, `BB-013`, `BB-014`, `BB-016`, `BB-018`
 
-### Urgent, Less Important
-- `T-060`, `T-061`, `T-062`
+Urgent, Less Important:
+- 없음
 
-### Neither
-- 없음(이번 범위는 전부 구조 의사결정에 직접 기여)
+Neither:
+- 없음
 
 ## Critical Path
 
-1. `T-010` -> `T-011` -> `T-012` (기준선 확보)
-2. `T-020` -> `T-021` -> `T-022` (문서 계약 고정)
-3. `T-030` -> `T-031` -> `T-033` -> `T-034` (코어 분해)
-4. `T-040` + `T-041` + `T-052` (사용성/경계 검증)
-5. `T-070` -> `T-071` -> `T-072` -> `T-073` (의사결정 수렴)
+`BB-001 -> BB-002 -> BB-003 -> BB-021 -> BB-004 -> BB-007 -> BB-010 -> BB-013 -> BB-015 -> BB-017 -> BB-019 -> BB-020`
 
 ## Decision Gates
 
-- DG-1 (Phase 0 종료): 인벤토리 누락 0건
-- DG-2 (Phase 1 종료): 문서 선언-구현 매핑률 100%
-- DG-3 (Phase 3 종료): 업스트림 대비 지원 갭 분류 완료(의도/결함)
-- DG-4 (Phase 6 종료): 3개 옵션 비교 + 1개 권고안 승인
-- DG-5 (Phase 7 종료): 최종 분석 보고서 + 실행 백로그 승인
+- DG-B1: Baseline snapshot/계약 동기화 완료 전 코드 재작성 금지
+- DG-B2: 목표 모듈 경계 승인 전 파일 이동 금지
+- DG-B3: Runtime 재작성 후 contract tests 실패 시 Adapter 재작성 진입 금지
+- DG-B4: Web/Artifact 보안/일관성 회귀가 0일 때만 파사드 리바인딩 허용
+- DG-B5: Workspace 전체 게이트 통과 전 컷오버 금지
+- DG-B6: 코드 영역(`crates/**`)에서 `todo!|unimplemented!|TODO` 탐지 0건 및 doc-contract sync pass 전 컷오버 금지
+
+## Phase ↔ Task Traceability
+
+- B0: `BB-001`, `BB-002`, `BB-003`, `BB-021`
+- B1: `BB-004`, `BB-005`, `BB-006`
+- B2: `BB-007`, `BB-008`, `BB-009`
+- B3: `BB-010`, `BB-011`, `BB-012`
+- B4: `BB-013`, `BB-014`
+- B5: `BB-015`, `BB-016`, `BB-017`, `BB-018`, `BB-019`, `BB-020`
+
+## Post-Cutover Hardening
+
+- `BB-022` (P1): CI schema drift 기본 소스를 `codex`로 상향해 PR 단계 drift 검출력을 높인다.
+- `BB-023` (P2): 실행/검증에 사용되지 않는 분석 레거시 문서를 정리해 문서 유지비용을 낮춘다.
+
+## Self-Feedback Iterations
+
+### Iteration 1 (초안 v1 -> v1.1)
+- 결함 1: 단계별 좁은 검증이 부족해 실행 가능성이 낮았음.
+  - 수정: 각 Phase에 구체 명령 기반 검증 항목 추가.
+- 결함 2: 파일 단위 컷오버 설계가 부족해 구현 착수 포인트가 모호했음.
+  - 수정: `Target File Cut Map` 추가.
+- 결함 3: 미구현 코드 차단 게이트가 검증 전략에 명시되지 않았음.
+  - 수정: `TODO/unimplemented` 탐지 게이트 추가.
+
+### Iteration 2 (v1.1 -> v1.2)
+- 결함 1: B5 traceability에 미구현 차단/정합성 태스크 매핑 누락.
+  - 수정: `BB-019`, `BB-020`을 B5 매핑에 추가.
+- 결함 2: facade 호환성 검증 기준이 실행 단계에 충분히 구체화되지 않았음.
+  - 수정: B4 검증에 API snapshot diff 0 기준을 명시.
+- 결함 3: 문서 정합성 점검 항목이 품질 게이트와 분리되어 추적성이 약했음.
+  - 수정: 문서/계약 동기화를 B0/B4/B5에 중복 고정.
+
+### Iteration 3 (v1.2 -> v1.3)
+- 결함 1: Phase B5 TASK-ID와 Traceability 표가 불일치했음.
+  - 수정: B5 TASK-ID에 `BB-019`, `BB-020`을 명시적으로 추가.
+- 결함 2: Critical Path/우선순위 매트릭스가 최종 정합성 게이트를 일부 누락했음.
+  - 수정: 경로/우선순위에 `BB-019`, `BB-020`을 추가.
+- 결함 3: Decision Gate에 no-stub/doc-sync 하드 차단 조건이 누락됐음.
+  - 수정: DG-B6 추가로 컷오버 차단 규칙 강화.
+
+### Iteration 4 (v1.3 -> v1.4)
+- 결함 1: B0에 schema drift 하드게이트가 명시되지 않아 baseline 진입 기준이 느슨했음.
+  - 수정: B0 검증에 `check_schema_drift(hard,codex)` 추가.
+- 결함 2: no-stub 검사 범위가 Docs까지 포함되어 컷오버 판정이 비결정적이었음.
+  - 수정: 코드 영역(`crates/**`)으로 검사 대상을 한정하고 규칙 문구를 고정.
+- 결함 3: Scope에 포함된 CI 워크플로우 변경 책임이 TASK에 매핑되지 않았음.
+  - 수정: `BB-021` 추가 및 B0 traceability/critical path에 반영.

@@ -17,7 +17,7 @@ echo "[release] gate: tests"
 cargo test --workspace
 
 echo "[release] gate: schema drift"
-COCLAI_SCHEMA_DRIFT_MODE=hard COCLAI_SCHEMA_DRIFT_SOURCE=codex ./scripts/check_schema_drift.sh
+COCLAI_SCHEMA_DRIFT_MODE=hard COCLAI_SCHEMA_DRIFT_SOURCE="${COCLAI_RELEASE_SCHEMA_DRIFT_SOURCE:-codex}" ./scripts/check_schema_drift.sh
 
 echo "[release] gate: schema manifest"
 ./scripts/check_schema_manifest.sh

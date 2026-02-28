@@ -1,6 +1,6 @@
 [package]
 name = "coclai_web"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 
 [dependencies]
@@ -9,4 +9,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 tokio.workspace = true
-coclai_runtime = { path = "../coclai_runtime" }
+coclai_runtime = { version = "0.1.4", path = "../coclai_runtime" }

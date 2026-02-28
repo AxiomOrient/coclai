@@ -1,10 +1,10 @@
 [package]
 name = "coclai"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 
 [dependencies]
-coclai_runtime = { path = "../coclai_runtime" }
+coclai_runtime = { version = "0.1.4", path = "../coclai_runtime" }
 thiserror = "2"
 serde.workspace = true
 serde_json.workspace = true

@@ -31,18 +31,13 @@ pub mod methods {
 }
 
 /// Validation mode for JSON-RPC data integrity checks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RpcValidationMode {
     /// Skip all contract checks.
     None,
     /// Validate only methods known to the current app-server contract.
+    #[default]
     KnownMethods,
-}
-
-impl Default for RpcValidationMode {
-    fn default() -> Self {
-        Self::KnownMethods
-    }
 }
 
 /// Validate outgoing JSON-RPC request payload for one method.

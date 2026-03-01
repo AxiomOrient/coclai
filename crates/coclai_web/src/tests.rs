@@ -9,6 +9,7 @@ use coclai_runtime::runtime::{RuntimeConfig, SchemaGuardConfig};
 use coclai_runtime::transport::StdioProcessSpec;
 use coclai_runtime::PluginContractVersion;
 use serde_json::json;
+use serde_json::Value;
 use tokio::time::{sleep, timeout, Instant};
 
 use super::*;

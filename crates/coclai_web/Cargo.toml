@@ -1,6 +1,6 @@
 [package]
 name = "coclai_web"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Web/session adapter and approval routing layer for coclai runtime."
 license = "MIT"
@@ -12,4 +12,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 tokio.workspace = true
-coclai_runtime = { version = "0.1.4", path = "../coclai_runtime" }
+coclai_runtime = { version = "0.1.5", path = "../coclai_runtime" }

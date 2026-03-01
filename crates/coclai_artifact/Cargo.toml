@@ -1,6 +1,6 @@
 [package]
 name = "coclai_artifact"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Artifact orchestration and patch/store adapter for coclai."
 license = "MIT"
@@ -13,7 +13,7 @@ thiserror.workspace = true
 sha2.workspace = true
 hex.workspace = true
 tokio.workspace = true
-coclai_runtime = { version = "0.1.4", path = "../coclai_runtime" }
+coclai_runtime = { version = "0.1.5", path = "../coclai_runtime" }
 
 [dev-dependencies]
 pretty_assertions = "1"

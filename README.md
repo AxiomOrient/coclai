@@ -349,10 +349,20 @@ cargo test --workspace
 1. `fmt`
 2. `clippy`
 3. product hygiene
-4. 전체 테스트
-5. schema drift (**hard-fail**, `source=codex`)
-6. schema manifest
-7. doc contract sync (**hard + mismatch=0 강제**)
+4. workspace 테스트 (실서버 2건 제외)
+5. `coclai` real-server 테스트 2건 별도 실행 (`quick_run`, `workflow_run`)
+6. runtime real-cli contract (`contract_real_cli`)
+7. schema drift (**hard-fail**, `source=codex`)
+8. schema manifest
+9. doc contract sync (**hard + mismatch=0 강제**)
+
+실서버 재시도 제어:
+- `COCLAI_RELEASE_REAL_SERVER_RETRIES` (기본 `3`, 최소 `1`)
+- `COCLAI_RELEASE_REAL_SERVER_BACKOFF_SEC` (기본 `3`)
+
+옵션 게이트:
+- `COCLAI_RELEASE_INCLUDE_PERF=1` -> `run_micro_bench.sh` 포함
+- `COCLAI_RELEASE_INCLUDE_NIGHTLY=1` -> `run_nightly_opt_in_gate.sh` 포함
 
 ### nightly/opt-in
 ```bash

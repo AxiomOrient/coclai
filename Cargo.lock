@@ -52,7 +52,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "coclai"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "coclai_runtime",
  "serde",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "coclai_artifact"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "coclai_runtime",
  "hex",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "coclai_plugin_core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "coclai_runtime"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "arc-swap",
  "coclai_plugin_core",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "coclai_web"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "coclai_runtime",
  "serde",

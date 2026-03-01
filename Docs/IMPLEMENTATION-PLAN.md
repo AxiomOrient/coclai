@@ -45,12 +45,14 @@
 
 현재 구조 관찰(증거 기반):
 - 런타임 고복잡도 파일 집중
-  - `api.rs` 1340 LOC
+  - `api/prompt_run.rs` 496 LOC
+  - `api/thread_api.rs` 276 LOC
+  - `api.rs` 48 LOC (facade)
   - `runtime.rs` 598 LOC
-  - `state.rs` 720 LOC
+  - `state.rs` 499 LOC
 - 어댑터 고복잡도 파일 집중
-  - `coclai_web/src/lib.rs` 387 LOC
-  - `coclai_artifact/src/lib.rs` 466 LOC
+  - `coclai_web/src/lib.rs` 224 LOC
+  - `coclai_artifact/src/lib.rs` 137 LOC
 - 의존 방향은 현재 양호
   - `coclai_web -> coclai_runtime`
   - `coclai_artifact -> coclai_runtime`
@@ -200,6 +202,7 @@ Coclai Facade (`crates/coclai/src`):
 - `./scripts/run_micro_bench.sh`
 - `./scripts/run_nightly_opt_in_gate.sh`
 - `./scripts/release_preflight.sh`
+  - preflight는 workspace 테스트와 `coclai` real-server 테스트를 분리 실행하며, real-server 구간은 `COCLAI_RELEASE_REAL_SERVER_RETRIES`, `COCLAI_RELEASE_REAL_SERVER_BACKOFF_SEC`로 재시도 정책을 제어
 
 5. 미구현/임시코드 차단
 - `rg -n "todo!\\(|unimplemented!\\(" crates`
@@ -264,6 +267,36 @@ Neither:
 
 - `BB-022` (P1): CI schema drift 기본 소스를 `codex`로 상향해 PR 단계 drift 검출력을 높인다.
 - `BB-023` (P2): 실행/검증에 사용되지 않는 분석 레거시 문서를 정리해 문서 유지비용을 낮춘다.
+
+## Option 2 Refactor Sprint (Post-0.1.4)
+
+목표:
+- 동작/공개 API 불변 조건을 유지하면서 파일 경계를 단순화한다.
+- 테스트 코드를 프로덕션 파일에서 분리해 유지보수 난이도를 낮춘다.
+
+대상 TASK-ID:
+- `BB-024`: inline test module 외부 파일 분리
+- `BB-025`: `coclai_runtime/src/api.rs` 책임 경계 추가 분해
+- `BB-026`: `coclai_web/src/lib.rs`, `coclai_artifact/src/lib.rs` 파사드 축소
+- `BB-027`: release preflight strict profile(perf/nightly) 옵션 실행 경로 추가
+- `BB-028`: doc-contract sync evidence 참조 유효성 검사 강화
+- `BB-029`: `state.rs` reducer 핫스팟 내부 분해(행동 불변)
+
+진행 상태:
+- `BB-024` 완료 (2026-02-28): inline test module을 `*/tests.rs`로 분리하고 `cargo test --workspace`, `bash scripts/release_preflight.sh` 통과.
+- `BB-025` 완료 (2026-02-28): `crates/coclai_runtime/src/api/types.rs` 분리로 `api.rs` LOC를 `1340 -> 794`로 축소, `cargo test -p coclai_runtime --lib --tests`, `cargo test --workspace`, `bash scripts/release_preflight.sh` 통과.
+- `BB-026` 완료 (2026-02-28): `crates/coclai_web/src/types.rs`, `crates/coclai_artifact/src/types.rs` 분리로 `lib.rs`를 파사드 중심으로 축소 (`web: 310 -> 224`, `artifact: 325 -> 137`), `cargo test -p coclai_web --lib`, `cargo test -p coclai_artifact --lib`, `cargo test --workspace`, `bash scripts/release_preflight.sh` 통과.
+- `BB-027` 완료 (2026-02-28): `release_preflight.sh`에 strict 옵션 게이트(`COCLAI_RELEASE_INCLUDE_PERF`, `COCLAI_RELEASE_INCLUDE_NIGHTLY`)를 추가하고 기본/strict 실행 모두 통과.
+- `BB-028` 완료 (2026-02-28): `check_doc_contract_sync.sh`에 evidence 경로 검증을 추가하고, `COCLAI_DOC_SYNC_VALIDATE_LINE_RANGES=1`에서 stale 라인 참조를 결정적으로 검출.
+- `BB-029` 완료 (2026-02-28): `reduce_in_place_with_limits`를 이벤트별 헬퍼(`handle_turn_*`, `handle_item_*`)로 분해하고 `coclai_runtime`/preflight 회귀 0 확인.
+
+검증 맵 (narrow -> broader):
+1. `cargo test -p coclai --lib --tests`
+2. `cargo test -p coclai_plugin_core --lib --tests`
+3. `cargo test -p coclai_runtime --lib --tests`
+4. `cargo test --workspace`
+5. `bash scripts/release_preflight.sh`
+6. `COCLAI_RELEASE_INCLUDE_PERF=1 COCLAI_RELEASE_INCLUDE_NIGHTLY=1 bash scripts/release_preflight.sh`
 
 ## Self-Feedback Iterations
 

@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOC_MAP="${COCLAI_DOC_CONTRACT_MAP:-$ROOT/Docs/analysis/CONTRACT-MATRIX.md}"
 MODE="${COCLAI_DOC_SYNC_MODE:-hard}" # hard|soft|off
 FAIL_ON_MISMATCH="${COCLAI_DOC_SYNC_FAIL_ON_MISMATCH:-0}" # 1 => fail when mismatch verdict exists
+VALIDATE_LINE_RANGES="${COCLAI_DOC_SYNC_VALIDATE_LINE_RANGES:-0}" # 1 => enforce file line upper bounds
 
 case "$MODE" in
   hard|soft|off) ;;
@@ -18,6 +19,14 @@ case "$FAIL_ON_MISMATCH" in
   0|1) ;;
   *)
     echo "[doc-sync] invalid COCLAI_DOC_SYNC_FAIL_ON_MISMATCH=$FAIL_ON_MISMATCH (allowed: 0|1)" >&2
+    exit 2
+    ;;
+esac
+
+case "$VALIDATE_LINE_RANGES" in
+  0|1) ;;
+  *)
+    echo "[doc-sync] invalid COCLAI_DOC_SYNC_VALIDATE_LINE_RANGES=$VALIDATE_LINE_RANGES (allowed: 0|1)" >&2
     exit 2
     ;;
 esac
@@ -37,7 +46,8 @@ if [[ ! -f "$DOC_MAP" ]]; then
 fi
 
 set +e
-output="$(python3 - "$DOC_MAP" "$FAIL_ON_MISMATCH" <<'PY'
+tmp_out="$(mktemp)"
+python3 - "$DOC_MAP" "$FAIL_ON_MISMATCH" "$ROOT" "$VALIDATE_LINE_RANGES" >"$tmp_out" <<'PY'
 from __future__ import annotations
 
 import collections
@@ -47,6 +57,8 @@ import sys
 
 doc_path = pathlib.Path(sys.argv[1])
 fail_on_mismatch = sys.argv[2] == "1"
+repo_root = pathlib.Path(sys.argv[3]).resolve()
+validate_line_ranges = sys.argv[4] == "1"
 text = doc_path.read_text(encoding="utf-8")
 
 marker = "## Declaration vs Implementation Matrix (T-022 Deliverable)"
@@ -87,6 +99,102 @@ if invalid_verdicts:
     print(f"[doc-sync] invalid verdict values: {', '.join(invalid_verdicts)}", file=sys.stderr)
     sys.exit(1)
 
+
+def parse_line_reference(token: str) -> tuple[str, int, int | None] | None:
+    match = re.match(r"^(.+?):(\d+)(?:-(\d+))?$", token)
+    if not match:
+        return None
+    path_part = match.group(1).strip()
+    start = int(match.group(2))
+    end = int(match.group(3)) if match.group(3) else None
+    return path_part, start, end
+
+
+def candidate_refs(evidence: str) -> list[str]:
+    refs = [segment.strip() for segment in re.findall(r"`([^`]+)`", evidence)]
+    if refs:
+        return [ref for ref in refs if ref]
+    fallback = [segment.strip() for segment in evidence.split(",")]
+    return [segment for segment in fallback if segment]
+
+
+def path_token(candidate: str) -> str:
+    token = candidate.strip().split()[0]
+    return token.strip(",")
+
+
+def looks_like_path(token: str) -> bool:
+    if token in {"-", "N/A", "n/a", "none", "None"}:
+        return False
+    if "://" in token:
+        return False
+    if "/" in token:
+        return True
+    if token.endswith((".md", ".rs", ".toml", ".yml", ".yaml", ".sh", ".json")):
+        return True
+    return False
+
+
+def resolve_under_repo(path_text: str) -> pathlib.Path:
+    candidate = (repo_root / path_text).resolve()
+    try:
+        candidate.relative_to(repo_root)
+    except ValueError:
+        raise ValueError(f"path escapes repository root: {path_text}")
+    return candidate
+
+
+def validate_evidence_reference(ref: str) -> str | None:
+    token = path_token(ref)
+    parsed_line = parse_line_reference(token)
+    path_text = token
+    start: int | None = None
+    end: int | None = None
+    if parsed_line is not None:
+        path_text, start, end = parsed_line
+
+    if any(ch in path_text for ch in "*?[]"):
+        if parsed_line is not None:
+            return f"line reference cannot use glob path: {ref}"
+        matches = list(repo_root.glob(path_text))
+        if not matches:
+            return f"glob path has no matches: {path_text}"
+        return None
+
+    try:
+        candidate_path = resolve_under_repo(path_text)
+    except ValueError as err:
+        return str(err)
+
+    if not candidate_path.exists():
+        return f"missing path: {path_text}"
+
+    if start is None:
+        return None
+    if not candidate_path.is_file():
+        return f"line reference must target a file: {path_text}:{start}"
+
+    if start < 1:
+        return f"invalid line start (<1): {path_text}:{start}"
+    if end is not None:
+        if end < start:
+            return f"invalid line range: {path_text}:{start}-{end}"
+    if not validate_line_ranges:
+        return None
+
+    line_count = 0
+    with candidate_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_count, _ in enumerate(handle, start=1):
+            pass
+    if line_count == 0:
+        line_count = 0
+
+    if start > line_count:
+        return f"line start out of range: {path_text}:{start} (max={line_count})"
+    if end is not None and end > line_count:
+        return f"line end out of range: {path_text}:{start}-{end} (max={line_count})"
+    return None
+
 def linked(evidence: str) -> bool:
     normalized = evidence.strip()
     return normalized not in {"", "-", "`-`", "N/A", "n/a", "none", "None"}
@@ -96,6 +204,18 @@ linked_rows = sum(1 for _, _, evidence in rows if linked(evidence))
 coverage = linked_rows / total
 missing_ids = [contract_id for contract_id, _, evidence in rows if not linked(evidence)]
 verdict_counts = collections.Counter(verdict for _, verdict, _ in rows)
+evidence_errors: list[str] = []
+checked_ref_count = 0
+
+for contract_id, _, evidence in rows:
+    for ref in candidate_refs(evidence):
+        token = path_token(ref)
+        if not looks_like_path(token):
+            continue
+        checked_ref_count += 1
+        err = validate_evidence_reference(ref)
+        if err is not None:
+            evidence_errors.append(f"{contract_id}: {err}")
 
 summary_errors: list[str] = []
 summary_total = re.search(r"- Total declarations evaluated:\s*`(\d+)`", text)
@@ -130,6 +250,10 @@ print(
     f" mismatch={verdict_counts['mismatch']}"
     f" uncertain={verdict_counts['uncertain']}"
 )
+print(
+    "[doc-sync] evidence refs:"
+    f" checked={checked_ref_count} invalid={len(evidence_errors)}"
+)
 
 if fail_on_mismatch and verdict_counts["mismatch"] > 0:
     print(
@@ -143,6 +267,11 @@ if summary_errors:
         print(f"[doc-sync] {err}", file=sys.stderr)
     sys.exit(1)
 
+if evidence_errors:
+    for err in evidence_errors:
+        print(f"[doc-sync] invalid evidence reference: {err}", file=sys.stderr)
+    sys.exit(1)
+
 if missing_ids:
     print(
         "[doc-sync] missing implementation evidence for: "
@@ -153,8 +282,9 @@ if missing_ids:
 
 print("[doc-sync] OK")
 PY
-)"
 rc=$?
+output="$(cat "$tmp_out")"
+rm -f "$tmp_out"
 set -e
 
 if [[ "$rc" -ne 0 ]]; then

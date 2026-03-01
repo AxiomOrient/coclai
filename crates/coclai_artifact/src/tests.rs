@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
+use coclai_runtime::api::ReasoningEffort;
+use coclai_runtime::errors::RuntimeError;
 use coclai_runtime::events::{Direction, Envelope, MsgKind};
 use coclai_runtime::runtime::{RuntimeConfig, SchemaGuardConfig};
 use coclai_runtime::transport::StdioProcessSpec;
@@ -11,6 +13,7 @@ use coclai_runtime::turn_output::{parse_thread_id, parse_turn_id};
 use coclai_runtime::PluginContractVersion;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use serde_json::Value;
 
 #[derive(Debug)]
 struct TempDir {

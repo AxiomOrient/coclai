@@ -14,6 +14,9 @@
 5. `rg -n "todo!\\(|unimplemented!\\(" crates` 결과 0
 6. `rg -n "TODO" crates --glob '!**/tests/fixtures/**'` 결과 0
 
+참고:
+- `release_preflight.sh`의 real-server 재시도는 `COCLAI_RELEASE_REAL_SERVER_RETRIES`(기본 `3`, 최소 `1`), `COCLAI_RELEASE_REAL_SERVER_BACKOFF_SEC`(기본 `3`)로 조정한다.
+
 ## 2) Rehearsal Record (2026-02-28)
 
 - `release_preflight.sh`: PASS

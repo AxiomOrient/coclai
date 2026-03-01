@@ -257,74 +257,80 @@ pub(super) fn validate_server_request_result_payload(
 ) -> Result<(), RuntimeError> {
     match method {
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-            let decision = result.get("decision");
-            match decision {
-                Some(Value::String(_)) => Ok(()),
-                Some(Value::Object(obj)) if !obj.is_empty() => Ok(()),
-                _ => Err(RuntimeError::Internal(format!(
-                    "invalid approval payload for {method}: missing decision"
-                ))),
-            }
+            validate_approval_payload(method, result)
         }
-        "item/tool/requestUserInput" => {
-            let Some(obj) = result.as_object() else {
-                return Err(RuntimeError::Internal(
-                    "invalid requestUserInput payload: expected object".to_owned(),
-                ));
-            };
-            if !matches!(obj.get("answers"), Some(Value::Object(_))) {
-                return Err(RuntimeError::Internal(
-                    "invalid requestUserInput payload: missing answers object".to_owned(),
-                ));
-            }
-            Ok(())
-        }
-        "item/tool/call" => {
-            let Some(obj) = result.as_object() else {
-                return Err(RuntimeError::Internal(
-                    "invalid dynamic tool call payload: expected object".to_owned(),
-                ));
-            };
-            if !matches!(obj.get("success"), Some(Value::Bool(_))) {
-                return Err(RuntimeError::Internal(
-                    "invalid dynamic tool call payload: missing success boolean".to_owned(),
-                ));
-            }
-            if !matches!(obj.get("contentItems"), Some(Value::Array(_))) {
-                return Err(RuntimeError::Internal(
-                    "invalid dynamic tool call payload: missing contentItems array".to_owned(),
-                ));
-            }
-            Ok(())
-        }
-        "account/chatgptAuthTokens/refresh" => {
-            let Some(obj) = result.as_object() else {
-                return Err(RuntimeError::Internal(
-                    "invalid auth refresh payload: expected object".to_owned(),
-                ));
-            };
-            if !matches!(obj.get("accessToken"), Some(Value::String(_))) {
-                return Err(RuntimeError::Internal(
-                    "invalid auth refresh payload: missing accessToken".to_owned(),
-                ));
-            }
-            if !matches!(obj.get("chatgptAccountId"), Some(Value::String(_))) {
-                return Err(RuntimeError::Internal(
-                    "invalid auth refresh payload: missing chatgptAccountId".to_owned(),
-                ));
-            }
-            if !matches!(
-                obj.get("chatgptPlanType"),
-                None | Some(Value::String(_)) | Some(Value::Null)
-            ) {
-                return Err(RuntimeError::Internal(
-                    "invalid auth refresh payload: chatgptPlanType must be string|null".to_owned(),
-                ));
-            }
-            Ok(())
-        }
+        "item/tool/requestUserInput" => validate_request_user_input_payload(result),
+        "item/tool/call" => validate_dynamic_tool_call_payload(result),
+        "account/chatgptAuthTokens/refresh" => validate_auth_refresh_payload(result),
         _ => Ok(()),
     }
+}
+
+fn validate_approval_payload(method: &str, result: &Value) -> Result<(), RuntimeError> {
+    match result.get("decision") {
+        Some(Value::String(_)) => Ok(()),
+        Some(Value::Object(obj)) if !obj.is_empty() => Ok(()),
+        _ => Err(RuntimeError::Internal(format!(
+            "invalid approval payload for {method}: missing decision"
+        ))),
+    }
+}
+
+fn validate_request_user_input_payload(result: &Value) -> Result<(), RuntimeError> {
+    let obj = require_object(result, "invalid requestUserInput payload: expected object")?;
+    if !matches!(obj.get("answers"), Some(Value::Object(_))) {
+        return Err(RuntimeError::Internal(
+            "invalid requestUserInput payload: missing answers object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dynamic_tool_call_payload(result: &Value) -> Result<(), RuntimeError> {
+    let obj = require_object(result, "invalid dynamic tool call payload: expected object")?;
+    if !matches!(obj.get("success"), Some(Value::Bool(_))) {
+        return Err(RuntimeError::Internal(
+            "invalid dynamic tool call payload: missing success boolean".to_owned(),
+        ));
+    }
+    if !matches!(obj.get("contentItems"), Some(Value::Array(_))) {
+        return Err(RuntimeError::Internal(
+            "invalid dynamic tool call payload: missing contentItems array".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_auth_refresh_payload(result: &Value) -> Result<(), RuntimeError> {
+    let obj = require_object(result, "invalid auth refresh payload: expected object")?;
+    if !matches!(obj.get("accessToken"), Some(Value::String(_))) {
+        return Err(RuntimeError::Internal(
+            "invalid auth refresh payload: missing accessToken".to_owned(),
+        ));
+    }
+    if !matches!(obj.get("chatgptAccountId"), Some(Value::String(_))) {
+        return Err(RuntimeError::Internal(
+            "invalid auth refresh payload: missing chatgptAccountId".to_owned(),
+        ));
+    }
+    if !matches!(
+        obj.get("chatgptPlanType"),
+        None | Some(Value::String(_)) | Some(Value::Null)
+    ) {
+        return Err(RuntimeError::Internal(
+            "invalid auth refresh payload: chatgptPlanType must be string|null".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_object<'a>(
+    value: &'a Value,
+    err_message: &'static str,
+) -> Result<&'a Map<String, Value>, RuntimeError> {
+    value
+        .as_object()
+        .ok_or_else(|| RuntimeError::Internal(err_message.to_owned()))
 }
 
 fn timeout_result_payload(method: &str, cancel: bool) -> Value {

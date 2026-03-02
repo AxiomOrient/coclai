@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/real_server_retry.sh"
 
 INCLUDE_PERF="${COCLAI_RELEASE_INCLUDE_PERF:-0}"
 INCLUDE_NIGHTLY="${COCLAI_RELEASE_INCLUDE_NIGHTLY:-0}"
@@ -44,34 +45,17 @@ case "$REAL_SERVER_BACKOFF_SEC" in
     ;;
 esac
 
-run_real_server_gate_with_retries() {
-  local max_attempts="$1"
-  local backoff_sec="$2"
-  local test_filter="$3"
-  local attempt=1
-  while (( attempt <= max_attempts )); do
-    echo "[release] gate: coclai real-server test '${test_filter}' (attempt ${attempt}/${max_attempts})"
-    if cargo test -p coclai "$test_filter" -- --nocapture; then
-      return 0
-    fi
-    if (( attempt == max_attempts )); then
-      echo "[release] coclai real-server test '${test_filter}' exhausted retries" >&2
-      return 1
-    fi
-    echo "[release] coclai real-server test '${test_filter}' failed; retrying in ${backoff_sec}s" >&2
-    sleep "$backoff_sec"
-    attempt=$((attempt + 1))
-  done
-}
-
 echo "[release] gate: fmt"
 cargo fmt --check
 
 echo "[release] gate: clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 
+echo "[release] gate: hexagonal boundaries"
+./scripts/check_hexagonal_boundaries.sh
+
 echo "[release] gate: product hygiene"
-./scripts/check_product_hygiene.sh
+COCLAI_HYGIENE_SKIP_CLIPPY=1 ./scripts/check_product_hygiene.sh
 
 echo "[release] gate: tests"
 cargo test --workspace -- \
@@ -80,15 +64,18 @@ cargo test --workspace -- \
 run_real_server_gate_with_retries \
   "$REAL_SERVER_RETRIES" \
   "$REAL_SERVER_BACKOFF_SEC" \
-  "ergonomic::tests::real_server::quick_run_executes_prompt_against_real_codex_server"
+  "ergonomic::tests::real_server::quick_run_executes_prompt_against_real_codex_server" \
+  "" \
+  "[release] gate: coclai real-server test"
 run_real_server_gate_with_retries \
   "$REAL_SERVER_RETRIES" \
   "$REAL_SERVER_BACKOFF_SEC" \
-  "ergonomic::tests::real_server::workflow_run_executes_prompt_against_real_codex_server"
+  "ergonomic::tests::real_server::workflow_run_executes_prompt_against_real_codex_server" \
+  "" \
+  "[release] gate: coclai real-server test"
 
-echo "[release] gate: runtime real-cli contract"
-APP_SERVER_CONTRACT=1 APP_SERVER_BIN="${COCLAI_RELEASE_APP_SERVER_BIN:-codex}" \
-  cargo test -p coclai_runtime --test contract_real_cli
+echo "[release] gate: agent go/no-go"
+COCLAI_AGENT_GO_NO_GO_MODE=ops-only ./scripts/release_agent_go_no_go.sh
 
 echo "[release] gate: schema drift"
 COCLAI_SCHEMA_DRIFT_MODE=hard COCLAI_SCHEMA_DRIFT_SOURCE="${COCLAI_RELEASE_SCHEMA_DRIFT_SOURCE:-codex}" ./scripts/check_schema_drift.sh

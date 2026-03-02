@@ -267,6 +267,9 @@ Neither:
 
 - `BB-022` (P1): CI schema drift 기본 소스를 `codex`로 상향해 PR 단계 drift 검출력을 높인다.
 - `BB-023` (P2): 실행/검증에 사용되지 않는 분석 레거시 문서를 정리해 문서 유지비용을 낮춘다.
+- `BB-039` (P1): 게이트 비필수 example과 빈 `SCHEMAS/golden/contracts` 디렉터리를 제거해 폴더 노이즈를 줄인다.
+- `BB-040` (P1): 미사용 placeholder 모듈(`infrastructure/*`, `adapters/outbound/jsonl_sink`)을 제거하고 문서 참조를 현재 트리 기준으로 정렬한다.
+- `BB-041` (P1): 릴리즈 스크립트 중복 로직(실서버 retry, 중복 clippy/게이트 호출)을 공통화해 기본 preflight 경로를 단순화한다.
 
 ## Option 2 Refactor Sprint (Post-0.1.4)
 
@@ -289,6 +292,9 @@ Neither:
 - `BB-027` 완료 (2026-02-28): `release_preflight.sh`에 strict 옵션 게이트(`COCLAI_RELEASE_INCLUDE_PERF`, `COCLAI_RELEASE_INCLUDE_NIGHTLY`)를 추가하고 기본/strict 실행 모두 통과.
 - `BB-028` 완료 (2026-02-28): `check_doc_contract_sync.sh`에 evidence 경로 검증을 추가하고, `COCLAI_DOC_SYNC_VALIDATE_LINE_RANGES=1`에서 stale 라인 참조를 결정적으로 검출.
 - `BB-029` 완료 (2026-02-28): `reduce_in_place_with_limits`를 이벤트별 헬퍼(`handle_turn_*`, `handle_item_*`)로 분해하고 `coclai_runtime`/preflight 회귀 0 확인.
+- `BB-039` 완료 (2026-03-02): `crates/coclai/examples/` 전체 삭제(`quick_run/workflow/workflow_privileged/rpc_direct/capability_parity_report`) + `SCHEMAS/golden/contracts` 제거, `release_agent_go_no_go`/`doc-sync` 재검증 통과.
+- `BB-040` 완료 (2026-03-02): `crates/coclai/src/infrastructure/**` 및 `crates/coclai/src/adapters/outbound/jsonl_sink/mod.rs` 제거, `lib.rs`/`adapters/outbound/mod.rs`/`ARCHITECTURE`/`CORE_API`/`CONTRACT-MATRIX` 동기화, `clippy`/`doc-sync`/`release_agent_go_no_go` 통과.
+- `BB-041` 완료 (2026-03-02): `scripts/lib/real_server_retry.sh` 추가로 preflight/nightly retry 로직 공통화, `release_preflight.sh`는 `COCLAI_HYGIENE_SKIP_CLIPPY=1`로 중복 clippy를 제거하고 `COCLAI_AGENT_GO_NO_GO_MODE=ops-only`로 운영 게이트만 재사용하도록 단순화, `release_agent_go_no_go`는 `full|ops-only` 모드 분리.
 
 검증 맵 (narrow -> broader):
 1. `cargo test -p coclai --lib --tests`

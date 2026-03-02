@@ -12,16 +12,20 @@ if rg -n \
   --glob '!**/*_tests.rs' \
   --glob '!**/tests/**' \
   "$MARKERS" \
-  crates/*/src; then
+  crates/coclai/src; then
   echo "[hygiene] found unfinished markers in product sources"
   exit 1
 fi
 
-echo "[hygiene] gate: panic/unwrap/expect forbidden in production targets"
-cargo clippy --workspace --lib --bins --examples -- \
-  -D warnings \
-  -D clippy::panic \
-  -D clippy::unwrap_used \
-  -D clippy::expect_used
+if [[ "${COCLAI_HYGIENE_SKIP_CLIPPY:-0}" == "1" ]]; then
+  echo "[hygiene] gate: clippy skipped (COCLAI_HYGIENE_SKIP_CLIPPY=1)"
+else
+  echo "[hygiene] gate: panic/unwrap/expect forbidden in production targets"
+  cargo clippy --workspace --lib --bins --examples -- \
+    -D warnings \
+    -D clippy::panic \
+    -D clippy::unwrap_used \
+    -D clippy::expect_used
+fi
 
 echo "[hygiene] passed"

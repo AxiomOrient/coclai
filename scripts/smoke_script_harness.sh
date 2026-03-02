@@ -27,7 +27,7 @@ fi
 echo "[smoke] negative: injected doc evidence gap must fail"
 tmp_doc="$(mktemp)"
 tmp_out="$(mktemp)"
-cp "$ROOT/Docs/analysis/CONTRACT-MATRIX.md" "$tmp_doc"
+cp "$ROOT/Docs/CONTRACT-MATRIX.md" "$tmp_doc"
 
 set +e
 awk '

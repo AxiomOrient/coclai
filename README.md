@@ -1,7 +1,7 @@
 # coclai
 
-`coclai`는 로컬 `codex app-server`를 Rust에서 안전하게 감싸는(workspace wrapper) 라이브러리입니다.
-핵심은 **라이프사이클 단순화**, **계약 검증 자동화**, **릴리즈 게이트 표준화**입니다.
+`coclai`는 로컬 `codex app-server`를 Rust에서 안전하게 감싸는 **agent-first monolith**입니다.
+핵심은 **단일 실행면(coclai-agent)**, **capability ingress parity**, **릴리즈 게이트 표준화**입니다.
 
 ---
 
@@ -13,9 +13,6 @@
 - [설치](#설치)
 - [빠른 시작](#빠른-시작)
 - [사용 경로 가이드](#사용-경로-가이드)
-- [Hook (pre/post)](#hook-prepost)
-- [JSON-RPC 직접 사용](#json-rpc-직접-사용)
-- [API 치트시트](#api-치트시트)
 - [보안 모델](#보안-모델)
 - [스키마/계약 운영](#스키마계약-운영)
 - [검증 및 릴리즈 게이트](#검증-및-릴리즈-게이트)
@@ -28,7 +25,7 @@
 ---
 
 ## 프로젝트 개요
-`coclai`는 다음 3가지를 기본 제공하는 Rust 워크스페이스입니다.
+`coclai`는 다음 3가지를 기본 제공하는 단일 런타임 crate 기반 프로젝트입니다.
 
 1. Codex 런타임 라이프사이클 표준화 (`connect -> run/setup -> ask -> close -> shutdown`)
 2. 스키마/JSON-RPC 계약 검증
@@ -40,7 +37,7 @@
 Codex를 Rust에서 직접 붙일 때 반복되는 운영 문제를 줄입니다.
 
 - 프로세스 spawn/shutdown, 세션 수명주기, 에러 매핑을 API로 고정
-- 초보자 경로(`quick_run`)와 전문가 경로(`Workflow`, `AppServer`)를 분리 제공
+- agent ingress(`stdio/http/ws`)와 Rust dispatch(`CoclaiAgent`)를 단일 계약으로 고정
 - Hook 체인(pre/post) 실패 시 메인 실행은 지속(fail-open)
 - schema drift/manifest/doc-sync를 게이트로 운영
 
@@ -50,11 +47,11 @@ Codex를 Rust에서 직접 붙일 때 반복되는 운영 문제를 줄입니다
 
 | 경로 | 역할 |
 |---|---|
-| `crates/coclai` | 공개 파사드(권장 진입점) |
-| `crates/coclai_runtime` | 런타임/JSON-RPC/상태/승인 라우팅 |
-| `crates/coclai_plugin_core` | hook/plugin 공통 계약 타입 |
-| `crates/coclai_artifact` | artifact 도메인 어댑터 |
-| `crates/coclai_web` | web 세션/SSE/approval 어댑터 |
+| `crates/coclai` | 단일 런타임 crate (domain/application/ports/adapters/bootstrap 포함) |
+| `crates/coclai/src/bin/coclai_agent.rs` | 외부 1급 진입점 (`stdio/http/ws`) |
+| `crates/coclai/src/agent` | transport-agnostic capability dispatch 경계 |
+| `crates/coclai/src/domain|application|ports|adapters|infrastructure|bootstrap` | 헥사고날 경계 |
+| `legacy/` 또는 제외된 레거시 crate | 아카이브 대상(비권장, 릴리즈 경로에서 제외) |
 | `SCHEMAS/` | app-server active schema + golden fixtures |
 | `scripts/` | 검증/스키마/릴리즈 스크립트 |
 
@@ -74,7 +71,7 @@ Codex를 Rust에서 직접 붙일 때 반복되는 운영 문제를 줄입니다
 1. `ClientConfig::with_schema_dir(...)`
 2. `APP_SERVER_SCHEMA_DIR`
 3. 현재 작업 디렉터리의 `SCHEMAS/app-server/active`
-4. 패키지 기본 경로 (`crates/coclai_runtime/../../SCHEMAS/app-server/active`)
+4. 패키지 기본 경로 (`crates/coclai/../../SCHEMAS/app-server/active`)
 
 ### 호환성 가드
 - `initialize.userAgent` 존재 필요
@@ -91,183 +88,133 @@ coclai = { path = "crates/coclai" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
+### 설치형 `coclai-agent` (macOS, launchd 기본)
+
+1) 설치/업데이트(기본 채널)
+```bash
+./scripts/macos/install_coclai_agent.sh
+```
+
+2) 롤백(직전 바이너리 복구)
+```bash
+./scripts/macos/rollback_coclai_agent.sh
+```
+
+3) 제거
+```bash
+./scripts/macos/uninstall_coclai_agent.sh
+```
+
+드라이런:
+```bash
+./scripts/macos/install_coclai_agent.sh --dry-run --skip-launchctl
+./scripts/macos/uninstall_coclai_agent.sh --dry-run --keep-binary
+./scripts/macos/rollback_coclai_agent.sh --dry-run --skip-launchctl
+```
+
+기본 경로:
+- 바이너리: `~/.local/bin/coclai-agent`
+- launchd plist: `~/Library/LaunchAgents/io.coclai.agent.plist`
+- 상태 디렉터리: `~/.coclai/agent` (`COCLAI_AGENT_STATE_DIR`로 override 가능)
+
+### `coclai-agent` 운영 명령
+
+```bash
+# foreground 서비스 (개발/디버그)
+coclai-agent start --foreground --bind 127.0.0.1:8787
+
+# background 서비스 시작/중지
+coclai-agent start --bind 127.0.0.1:8787
+coclai-agent stop
+
+# 상태/기능 조회
+coclai-agent status
+coclai-agent list-capabilities --ingress stdio
+coclai-agent invoke system/health
+
+# 네트워크 ingress 계약 검증(로컬 loopback + 토큰 필요)
+COCLAI_AGENT_TOKEN=dev-token coclai-agent invoke system/health \
+  --ingress http \
+  --caller 127.0.0.1:39000 \
+  --token dev-token
+
+# HTTP ingress (axum)
+curl -sS -H "x-coclai-token: dev-token" \
+  http://127.0.0.1:8787/health
+curl -sS -H "x-coclai-token: dev-token" \
+  -H "content-type: application/json" \
+  -d '{"capability_id":"system/capability_registry"}' \
+  http://127.0.0.1:8787/invoke
+```
+
+네트워크 ingress 경로:
+- `GET /health` (`system/health`)
+- `GET /capabilities` (`system/capability_registry`)
+- `POST /invoke` (임의 capability envelope)
+- `GET /ws` (WebSocket JSON envelope)
+
+바인드 주소 우선순위:
+1. CLI `--bind <host:port>`
+2. `COCLAI_AGENT_BIND_ADDR`
+3. 기본값 `127.0.0.1:8787`
+
 ---
 
 ## 빠른 시작
 
-### 1) One-shot (가장 짧은 경로)
+### 1) Rust에서 직접 호출
 
 ```rust
-use coclai::quick_run;
+use coclai::{CapabilityIngress, CapabilityInvocation, CoclaiAgent};
+use serde_json::json;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out = quick_run("/ABS/PATH/WORKDIR", "이 디렉터리 핵심을 3줄로 요약해줘").await?;
-    println!("{}", out.assistant_text);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let agent = CoclaiAgent::new();
+    let out = agent.dispatch(CapabilityInvocation {
+        capability_id: "quick_run".to_owned(),
+        ingress: CapabilityIngress::Stdio,
+        correlation_id: None,
+        session_id: None,
+        caller_addr: None,
+        auth_token: None,
+        payload: json!({
+            "cwd": "/ABS/PATH/WORKDIR",
+            "prompt": "이 디렉터리 핵심을 3줄로 요약해줘"
+        }),
+    })?;
+
+    println!("{}", out.result["assistant_text"].as_str().unwrap_or_default());
     Ok(())
 }
 ```
 
-### 2) 명시적 세션 경로 (`Client` + `Session`)
+### 2) `coclai-agent` CLI 호출
 
-```rust
-use coclai::Client;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::connect_default().await?;
-    let session = client.setup("/ABS/PATH/WORKDIR").await?;
-
-    let a = session.ask("첫 질문").await?;
-    let b = session.ask("두 번째 질문").await?;
-    println!("A: {}", a.assistant_text);
-    println!("B: {}", b.assistant_text);
-
-    session.close().await?;
-    client.shutdown().await?;
-    Ok(())
-}
+```bash
+coclai-agent status
+coclai-agent list-capabilities --ingress stdio
+coclai-agent invoke system/health
+coclai-agent invoke quick_run --payload '{"cwd":"/ABS/PATH/WORKDIR","prompt":"요약해줘"}'
 ```
 
 ### 3) 실행 가능한 예제
 
 ```bash
-# one-shot
-COCLAI_CWD=/ABS/PATH/WORKDIR COCLAI_PROMPT="요약해줘" \
-  cargo run -p coclai --example quick_run
-
-# workflow (expert safe defaults)
-COCLAI_CWD=/ABS/PATH/WORKDIR COCLAI_PROMPT="README 핵심 정리" \
-  cargo run -p coclai --example workflow
-
-# workflow (privileged sandbox + explicit opt-in)
-COCLAI_CWD=/ABS/PATH/WORKDIR COCLAI_PROMPT="README 핵심 정리" \
-  cargo run -p coclai --example workflow_privileged
-
-# JSON-RPC direct (turn/completed까지 기다린 뒤 최종 assistant text 출력)
-COCLAI_CWD=/ABS/PATH/WORKDIR COCLAI_PROMPT="hello" \
-  cargo run -p coclai --example rpc_direct
+coclai-agent invoke system/capability_parity_report
 ```
 
 ---
 
 ## 사용 경로 가이드
 
-### Beginner Path
-- `quick_run(cwd, prompt)`
-- `quick_run_with_profile(cwd, prompt, profile)`
+권장 경로:
+1. 외부 통합: `coclai-agent` ingress (`stdio`, `http(localhost)`, `ws(localhost)`)
+2. Rust 통합: `CoclaiAgent::dispatch(CapabilityInvocation)`
 
-특징:
-- 연결/실행/종료를 한 번에 수행
-- 가장 빠른 온보딩
-
-### Expert Path (Safe Default)
-
-```rust
-use coclai::{ReasoningEffort, Workflow, WorkflowConfig};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = WorkflowConfig::new("/ABS/PATH/WORKDIR")
-        .with_model("gpt-5-codex")
-        .with_effort(ReasoningEffort::High)
-        .attach_path("README.md");
-
-    let workflow = Workflow::connect(cfg).await?;
-    let out = workflow.run("핵심만 정리해줘").await?;
-    println!("{}", out.assistant_text);
-    workflow.shutdown().await?;
-    Ok(())
-}
-```
-
-### Expert Path (Privileged Sandbox)
-`WorkspaceWrite`/`DangerFullAccess` 계열을 사용할 때는 **반드시** explicit opt-in을 켜야 합니다.
-
-```rust
-use coclai::{
-    ApprovalPolicy, ReasoningEffort, RunProfile, SandboxPolicy, SandboxPreset, Workflow,
-    WorkflowConfig,
-};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = "/ABS/PATH/WORKDIR";
-    let profile = RunProfile::new()
-        .with_model("gpt-5-codex")
-        .with_effort(ReasoningEffort::High)
-        .with_approval_policy(ApprovalPolicy::OnRequest)
-        .with_sandbox_policy(SandboxPolicy::Preset(SandboxPreset::WorkspaceWrite {
-            writable_roots: vec![cwd.to_owned()],
-            network_access: false,
-        }))
-        .allow_privileged_escalation();
-
-    let workflow = Workflow::connect(WorkflowConfig::new(cwd).with_run_profile(profile)).await?;
-    let out = workflow.run("핵심만 정리해줘").await?;
-    println!("{}", out.assistant_text);
-    workflow.shutdown().await?;
-    Ok(())
-}
-```
-
----
-
-## Hook (pre/post)
-
-등록 지점:
-- `ClientConfig::with_pre_hook(...)`, `ClientConfig::with_post_hook(...)`
-- `RunProfile::with_pre_hook(...)`, `RunProfile::with_post_hook(...)`
-- `SessionConfig::with_pre_hook(...)`, `SessionConfig::with_post_hook(...)`
-
-실행 규칙:
-- 순서: `pre -> core call -> post`
-- pre hook 입력 변형 허용 필드: `prompt`, `model`, `attachments`, `metadata_delta`
-- hook 오류 처리: fail-open
-  - 메인 실행은 계속 진행
-  - 오류는 `HookReport`에 누적
-
----
-
-## JSON-RPC 직접 사용
-`AppServer`는 codex app-server JSON-RPC를 직접 다루는 얇은 파사드입니다.
-
-제공 호출:
-- validated: `request_json`, `notify_json`
-- typed: `request_typed`, `notify_typed`
-- mode 지정: `request_json_with_mode`, `notify_json_with_mode`, `request_typed_with_mode`, `notify_typed_with_mode`
-- unchecked: `request_json_unchecked`, `notify_json_unchecked`
-- server request: `take_server_requests`, `respond_server_request_ok`, `respond_server_request_err`
-
-`rpc_methods` 상수:
-- `thread/start`, `thread/resume`, `thread/fork`, `thread/archive`
-- `thread/read`, `thread/list`, `thread/loaded/list`, `thread/rollback`
-- `turn/start`, `turn/interrupt`
-
-```rust
-use coclai::{rpc_methods, AppServer};
-use serde_json::json;
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let app = AppServer::connect_default().await?;
-    let thread = app.request_json(rpc_methods::THREAD_START, json!({})).await?;
-    println!("{thread}");
-    app.shutdown().await?;
-    Ok(())
-}
-```
-
----
-
-## API 치트시트
-
-고수준:
-- `Client::connect_default`, `Client::connect`
-- `Client::run`, `Client::run_with`, `Client::run_with_profile`
-- `Client::setup`, `Client::setup_with_profile`, `Client::start_session`, `Client::resume_session`
-- `Client::continue_session`, `Client::continue_session_with`, `Client::continue_session_with_profile`
-- `Client::interrupt_session_turn`, `Client::close_session`, `Client::shutdown`
+운영 원칙:
+- capability 요청/응답 계약은 ingress별로 동일 의미를 유지합니다.
+- 네트워크 ingress는 `loopback + token` 정책을 강제합니다.
+- 0.2.0부터 공개면은 agent-first로 고정되며, 과거 broad facade 기반 통합은 권장하지 않습니다.
 - `Session::ask`, `Session::ask_with`, `Session::ask_with_profile`, `Session::interrupt_turn`, `Session::close`
 
 워크플로우:
@@ -299,6 +246,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Web 경계
 - tenant/session/thread 교차 접근 금지
 - 외부 노출 금지 식별자: 내부 `rpc_id`
+
+### `coclai-agent` 로컬 ingress 경계
+- `http(localhost)`/`ws(localhost)` ingress는 loopback caller만 허용 (`--caller`가 `127.0.0.1`, `::1`, `localhost` 계열이어야 함)
+- 네트워크 ingress는 토큰 일치가 필수 (`COCLAI_AGENT_TOKEN` == `--token`)
+- 토큰 미설정 상태에서 네트워크 ingress 호출은 거부됨(기본 deny)
+- `stdio` ingress는 로컬 프로세스 경로로 간주되어 토큰 요구 없음
 
 ---
 
@@ -386,15 +339,18 @@ cargo test --workspace
   - 릴리즈 자동화 사용자(`release_preflight.sh`)
 
 ### Breaking/Migration 체크
-- API 시그니처 변경 없음
-- `workflow` 기본 예제는 안전 기본값으로 동작 (마이그레이션 불필요)
+- **0.2.0 브레이킹 릴리즈 기준**
+- 외부 1급 통합 경로는 `coclai-agent` ingress(`stdio/http/ws`)로 고정
+- 기존 Rust API는 보조 경로이며, 하위 호환을 보장하지 않음
 - 권한 상승 경로 사용자는 `allow_privileged_escalation` 필요
 - 릴리즈 게이트는 drift 발견 시 hard-fail
+- 네트워크 ingress 소비자는 `COCLAI_AGENT_TOKEN` 발급/배포 절차를 먼저 준비해야 함
 
 ### Rollout Plan
 1. 로컬 게이트 통과 (`fmt`, `clippy`, `test`, `doc-sync`)
 2. `release_preflight.sh` 실행
-3. drift 해결 후 태그/릴리즈 진행
+3. `release_agent_go_no_go.sh` 실행 (lifecycle + local ingress security)
+4. drift 해결 후 태그/릴리즈 진행
 
 ### Rollback Plan
 - 예제 변경 회귀 시: `workflow_privileged` 경로만 유지하고 `workflow`를 이전 상태로 복원
@@ -432,14 +388,14 @@ cargo test --workspace
 - Core API: `Docs/CORE_API.md`
 - Schema & Contract: `Docs/SCHEMA_AND_CONTRACT.md`
 - Security: `Docs/SECURITY.md`
-- Analysis Contract Matrix: `Docs/analysis/CONTRACT-MATRIX.md`
+- Analysis Contract Matrix: `Docs/CONTRACT-MATRIX.md`
 
 ---
 
 ## 기여
 - 변경 전 `cargo fmt --check`, `cargo clippy`, `cargo test --workspace` 실행 권장
 - 계약/스키마 변경이 있으면 `scripts/*` 게이트까지 함께 확인
-- 문서 주장 변경 시 `Docs/analysis/CONTRACT-MATRIX.md`와 동기화 유지
+- 문서 주장 변경 시 `Docs/CONTRACT-MATRIX.md`와 동기화 유지
 
 ---
 

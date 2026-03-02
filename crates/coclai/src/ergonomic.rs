@@ -2,11 +2,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use coclai_runtime::{
-    ApprovalPolicy, Client, ClientConfig, ClientError, CompatibilityGuard, PostHook, PreHook,
-    PromptAttachment, PromptRunError, PromptRunResult, ReasoningEffort, RunProfile, RuntimeError,
-    RuntimeHookConfig, SandboxPolicy, Session, SessionConfig,
+use crate::api::{
+    ApprovalPolicy, PromptAttachment, PromptRunError, PromptRunResult, ReasoningEffort,
+    SandboxPolicy,
 };
+use crate::client::{
+    Client, ClientConfig, ClientError, CompatibilityGuard, RunProfile, Session, SessionConfig,
+};
+use crate::errors::RuntimeError;
+use crate::hooks::RuntimeHookConfig;
+use crate::plugin_core_contract::{PostHook, PreHook};
 use thiserror::Error;
 
 /// One explicit data model for reusable workflow defaults.

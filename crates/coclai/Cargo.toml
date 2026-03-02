@@ -1,16 +1,23 @@
 [package]
 name = "coclai"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2021"
 description = "Ergonomic Rust wrapper for codex app-server with runtime safety and release gates."
 license = "MIT"
 repository = "https://github.com/AxiomOrient/coclai"
 
 [dependencies]
-coclai_runtime = { version = "0.1.5", path = "../coclai_runtime" }
 thiserror = "2"
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+arc-swap.workspace = true
+axum = { version = "0.7", features = ["ws", "json"] }
+futures-util = "0.3"
 
 [dev-dependencies]
-tokio = { workspace = true }
+pretty_assertions = "1"

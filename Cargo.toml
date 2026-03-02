@@ -1,17 +1,11 @@
 [workspace]
-members = [
-  "crates/coclai",
-  "crates/coclai_plugin_core",
-  "crates/coclai_runtime",
-  "crates/coclai_artifact",
-  "crates/coclai_web",
-]
+members = ["crates/coclai"]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.1.5"
+version = "0.2.0"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

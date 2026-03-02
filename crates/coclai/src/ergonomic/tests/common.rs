@@ -1,5 +1,5 @@
 use super::super::*;
-use coclai_runtime::{HookAction, HookContext, HookIssue, HookPatch};
+use crate::plugin_core_contract::{HookAction, HookContext, HookIssue, HookPatch};
 use std::future::Future;
 use std::pin::Pin;
 

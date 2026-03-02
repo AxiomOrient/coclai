@@ -1,23 +1,46 @@
-//! Public facade for the coclai workspace.
-//! Default path: use this crate first. Use `coclai::runtime` for low-level control.
+#![allow(dead_code)]
 
+//! Public facade for coclai.
+//! This crate is intentionally monolithic: runtime/plugin/facade are compiled here.
+
+mod plugin_core_contract;
+
+mod api;
+mod approvals;
+mod client;
+mod errors;
+mod events;
+mod hooks;
+mod metrics;
+mod rpc;
+mod rpc_contract;
+mod runtime;
+pub(crate) mod runtime_schema;
+mod schema;
+mod sink;
+mod state;
+mod transport;
+mod turn_output;
+
+pub(crate) mod adapters;
+mod agent;
+pub(crate) mod application;
 mod appserver;
+pub(crate) mod bootstrap;
+mod capability;
+pub(crate) mod domain;
 mod ergonomic;
+pub(crate) mod ports;
 
-pub use appserver::{methods as rpc_methods, AppServer};
-pub use coclai_runtime::{
-    ApprovalPolicy, Client, ClientConfig, ClientError, CompatibilityGuard, HookAction,
-    HookAttachment, HookContext, HookIssue, HookIssueClass, HookPatch, HookPhase, HookReport,
-    PluginContractVersion, PostHook, PreHook, PromptAttachment, PromptRunError, PromptRunParams,
-    PromptRunResult, ReasoningEffort, RpcError, RpcErrorObject, RpcValidationMode, RunProfile,
-    RuntimeError, RuntimeHookConfig, SandboxPolicy, SandboxPreset, SemVerTriplet, ServerRequest,
-    ServerRequestRx, Session, SessionConfig, ThreadAgentMessageItemView,
-    ThreadCommandExecutionItemView, ThreadItemPayloadView, ThreadItemType, ThreadItemView,
-    ThreadListParams, ThreadListResponse, ThreadListSortKey, ThreadLoadedListParams,
-    ThreadLoadedListResponse, ThreadReadParams, ThreadReadResponse, ThreadRollbackParams,
-    ThreadRollbackResponse, ThreadTurnErrorView, ThreadTurnStatus, ThreadTurnView, ThreadView,
-    DEFAULT_REASONING_EFFORT,
+pub use bootstrap::container::build_agent;
+pub(crate) type ServerRequestRx = tokio::sync::mpsc::Receiver<approvals::ServerRequest>;
+
+pub use agent::{
+    AgentDispatchError, AgentHealth, AgentSecurityPolicy, CapabilityInvocation, CapabilityResponse,
+    CoclaiAgent,
 };
-pub use ergonomic::{quick_run, quick_run_with_profile, QuickRunError, Workflow, WorkflowConfig};
-
-pub use coclai_runtime as runtime;
+pub use capability::{
+    capability_by_id, capability_parity_gaps, capability_registry,
+    missing_capabilities_for_ingress, render_capability_parity_report, CapabilityDescriptor,
+    CapabilityExposure, CapabilityIngress, CapabilityIngressSupport,
+};

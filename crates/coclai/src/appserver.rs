@@ -1,14 +1,15 @@
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
-use coclai_runtime::{
-    Client, ClientConfig, ClientError, RpcError, RpcErrorObject, RpcValidationMode, Runtime,
-    RuntimeError, ServerRequestRx,
-};
+use crate::client::{Client, ClientConfig, ClientError};
+use crate::errors::{RpcError, RpcErrorObject, RuntimeError};
+use crate::rpc_contract::RpcValidationMode;
+use crate::runtime::Runtime;
+use crate::ServerRequestRx;
 
 /// Canonical app-server JSON-RPC method names.
 pub mod methods {
-    pub use coclai_runtime::rpc_contract::methods::{
+    pub use crate::rpc_contract::methods::{
         THREAD_ARCHIVE, THREAD_FORK, THREAD_LIST, THREAD_LOADED_LIST, THREAD_READ, THREAD_RESUME,
         THREAD_ROLLBACK, THREAD_START, TURN_INTERRUPT, TURN_START,
     };

@@ -1,100 +1,58 @@
 # ARCHITECTURE
 
-`coclai`는 1개 파사드 + 3개 실행 계층으로 구성됩니다.
+`coclai`는 **단일 런타임 crate(`crates/coclai`)** 내부에서 헥사고날 경계로 분리된 agent-first monolith입니다.
 
-## 1) 계층 경계 (MECE)
+## 1) 계층 경계
 
-### 1.1 Public Facade (`coclai`)
-- 책임:
-  - 기본 사용자 진입점 제공
-  - 고수준 API만 재노출
-  - 저수준 제어로 가는 명시적 통로 제공(`coclai::runtime`)
-- 비책임:
-  - transport/rpc 구현
-  - 도메인 patch 로직
-  - 웹 세션 라우팅
+### 1.1 domain
+- 책임: capability/session/thread/turn/approval/artifact/runtime_state 순수 모델과 규칙
+- 비책임: 네트워크, 프로세스 spawn, tokio/axum 의존
 
-### 1.2 Core Runtime (`coclai_runtime`)
-- 책임:
-  - stdio(JSONL) transport
-  - JSON-RPC dispatch/pending
-  - approval routing
-  - state projection (`RuntimeState`)
-  - metrics snapshot
-- 비책임:
-  - 영속 저장소 정책
-  - 웹 인증/인가
-  - 도메인 프롬프트 설계
+### 1.2 application
+- 책임: use-case 조합(`capability_dispatch`, `quick_run`, `workflow`, `appserver`, `thread_turn`)
+- 비책임: adapter concrete 직접 참조
 
-### 1.3 Domain Layer (`coclai_artifact`)
-- 책임:
-  - 문서/규칙 작업 spec 모델링
-  - DocPatch 검증/적용
-  - ArtifactStore 연동
-- 비책임:
-  - transport/restart/lifecycle
-  - 웹 세션 관리
+### 1.3 ports
+- 책임: inbound/outbound trait 계약 정의
+- 비책임: 구현체/런타임 I/O
 
-### 1.4 Web Adapter (`coclai_web`)
-- 책임:
-  - session/thread tenant 분리
-  - SSE event streaming
-  - approval REST bridge
-- 비책임:
-  - 코어 RPC 파서/리듀서 변경
-  - 도메인 patch 알고리즘
+### 1.4 adapters
+- inbound: `cli/http/ws/stdio` 입력 파싱, 인증, 에러 변환
+- outbound: `codex_stdio/memory_store` I/O 구현
 
-## 2) 데이터 우선 모델
+### 1.5 bootstrap/bin
+- `bootstrap`: container 조립점
+- `bin/coclai_agent.rs`: orchestration only
 
-핵심 상태는 명시적 구조체로 고정합니다.
+## 2) Agent-first 표준 경로
+
+- 외부 통합은 `coclai-agent`를 통해 수행
+- ingress: `stdio`, `HTTP(localhost)`, `WS(localhost)`
+- 공통 계약: `CapabilityInvocation` / `CapabilityResponse`
+- 보안 정책: loopback + token
+- root 공개 Rust API는 `build_agent`, `CoclaiAgent`, capability registry/parity 집합으로 최소화
+
+## 3) 데이터 우선 모델
+
+핵심 상태/메시지는 명시적 타입으로 고정한다.
 
 - 이벤트: `Envelope`
 - 런타임 상태: `RuntimeState`, `ThreadState`, `TurnState`, `ItemState`
-- 승인 요청: `ServerRequest`, `PendingServerRequest`
-- 계측 스냅샷: `RuntimeMetricsSnapshot`
-- 웹 세션: `CreateSessionRequest/Response`, `CreateTurnRequest/Response`
-- 도메인 patch: `DocPatch`, `DocEdit`, `PatchConflict`
+- 승인 요청: `ServerRequest`
+- 계측: `RuntimeMetricsSnapshot`
+- agent capability envelope: `CapabilityInvocation`, `CapabilityResponse`
 
-## 3) 순수 변환 vs 부수효과
+## 4) 강제 규칙
 
-### 3.1 순수 변환
-- `classify_message`
-- `extract_ids`
-- `reduce` / `reduce_in_place`
-- `validate_doc_patch`
-- `apply_doc_patch`
-- `route_server_request` (approval 라우팅 분기)
+1. `domain`에서 `axum/tokio/std::process::Command` import 금지
+2. `application`에서 `adapters::` 직접 참조 금지
+3. ingress adapter는 파싱/검증/에러 변환만 수행
+4. 비즈니스 분기 로직은 application으로 수렴
+5. 외부 I/O는 outbound adapter/infrastructure로 제한
 
-### 3.2 부수효과 경계
-- child spawn/kill
-- stdin/stdout I/O
-- timeout scheduling
-- file store read/write
-- event sink write
-- web request/response
+정적 검사:
+- `scripts/check_hexagonal_boundaries.sh`
 
-원칙:
-- 순수 변환은 외부 I/O를 호출하지 않는다.
-- 부수효과 함수는 순수 변환 결과를 적용만 한다.
+## 5) 릴리즈 게이트
 
-## 4) 런타임 파이프라인
-
-1. transport reader가 JSONL line을 읽는다.
-2. dispatcher가 `MsgKind`로 분류한다.
-3. pending response resolve / server request queue / notification 처리.
-4. `Envelope`를 생성한다.
-5. reducer가 상태 스냅샷을 갱신한다.
-6. sink(옵션)로 비차단 전달한다.
-7. live broadcast로 외부 subscriber에 전달한다.
-
-## 5) 성능 모델
-
-- pending lookup: 평균 O(1)
-- reducer map access: 평균 O(1)
-- approval lookup: O(1)
-- sink 전달: `try_send` 기반 비차단
-- metrics: atomic counter 기반 O(1)
-
-핵심 제약:
-- 핫패스에서 불필요한 deep copy 금지
-- 대기열 포화 시 코어 경로는 멈추지 않고 drop+계측
+- release gate: `scripts/release_agent_go_no_go.sh`

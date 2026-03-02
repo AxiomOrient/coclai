@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DOC_MAP="${COCLAI_DOC_CONTRACT_MAP:-$ROOT/Docs/analysis/CONTRACT-MATRIX.md}"
+DOC_MAP="${COCLAI_DOC_CONTRACT_MAP:-$ROOT/Docs/CONTRACT-MATRIX.md}"
 MODE="${COCLAI_DOC_SYNC_MODE:-hard}" # hard|soft|off
 FAIL_ON_MISMATCH="${COCLAI_DOC_SYNC_FAIL_ON_MISMATCH:-0}" # 1 => fail when mismatch verdict exists
 VALIDATE_LINE_RANGES="${COCLAI_DOC_SYNC_VALIDATE_LINE_RANGES:-0}" # 1 => enforce file line upper bounds

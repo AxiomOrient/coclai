@@ -1,4 +1,4 @@
-use crate::{ThreadReadParams, ThreadReadResponse};
+use crate::api::{ThreadReadParams, ThreadReadResponse};
 use serde_json::{json, Value};
 
 use super::*;

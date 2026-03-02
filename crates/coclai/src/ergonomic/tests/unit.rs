@@ -1,6 +1,7 @@
 use super::super::*;
 use super::common::{TestPostHook, TestPreHook};
-use coclai_runtime::HookPhase;
+use crate::api::SandboxPreset;
+use crate::plugin_core_contract::HookPhase;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ fn workflow_config_defaults_are_safe_and_explicit() {
     assert_eq!(config.run_profile.approval_policy, ApprovalPolicy::Never);
     assert_eq!(
         config.run_profile.sandbox_policy,
-        SandboxPolicy::Preset(coclai_runtime::SandboxPreset::ReadOnly)
+        SandboxPolicy::Preset(SandboxPreset::ReadOnly)
     );
     assert!(config.run_profile.attachments.is_empty());
     assert!(config.run_profile.hooks.pre_hooks.is_empty());

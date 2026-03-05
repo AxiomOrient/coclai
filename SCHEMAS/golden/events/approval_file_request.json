@@ -1,9 +1,0 @@
-{
-  "method": "item/fileChange/requestApproval",
-  "paramKeys": [
-    "changes",
-    "itemId",
-    "threadId",
-    "turnId"
-  ]
-}

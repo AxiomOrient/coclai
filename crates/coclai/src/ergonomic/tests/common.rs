@@ -1,5 +1,4 @@
-use super::super::*;
-use crate::plugin_core_contract::{HookAction, HookContext, HookIssue, HookPatch};
+use crate::plugin::{HookAction, HookContext, HookIssue, HookPatch, PostHook, PreHook};
 use std::future::Future;
 use std::pin::Pin;
 

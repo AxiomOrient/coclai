@@ -1,4 +1,6 @@
 use super::super::*;
+use crate::runtime::PromptRunResult;
+use std::time::Duration;
 use tokio::time::{sleep, Duration as TokioDuration};
 
 const MAX_REAL_SERVER_RETRIES: usize = 5;
@@ -57,6 +59,7 @@ async fn workflow_run_attempt(cwd: String) -> Result<PromptRunResult, String> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "opt-in live test: requires real codex server"]
 async fn quick_run_executes_prompt_against_real_codex_server() {
     let cwd = std::env::current_dir()
         .expect("cwd")
@@ -96,6 +99,7 @@ async fn quick_run_executes_prompt_against_real_codex_server() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "opt-in live test: requires real codex server"]
 async fn workflow_run_executes_prompt_against_real_codex_server() {
     let cwd = std::env::current_dir()
         .expect("cwd")

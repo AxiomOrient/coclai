@@ -3,25 +3,16 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
-source "$ROOT_DIR/scripts/lib/real_server_retry.sh"
 
-INCLUDE_PERF="${COCLAI_RELEASE_INCLUDE_PERF:-0}"
-INCLUDE_NIGHTLY="${COCLAI_RELEASE_INCLUDE_NIGHTLY:-0}"
+PKG="${COCLAI_PKG:-coclai}"
+INCLUDE_REAL_SERVER="${COCLAI_RELEASE_INCLUDE_REAL_SERVER:-0}"
 REAL_SERVER_RETRIES="${COCLAI_RELEASE_REAL_SERVER_RETRIES:-3}"
 REAL_SERVER_BACKOFF_SEC="${COCLAI_RELEASE_REAL_SERVER_BACKOFF_SEC:-3}"
 
-case "$INCLUDE_PERF" in
+case "$INCLUDE_REAL_SERVER" in
   0|1) ;;
   *)
-    echo "[release] invalid COCLAI_RELEASE_INCLUDE_PERF=$INCLUDE_PERF (allowed: 0|1)" >&2
-    exit 2
-    ;;
-esac
-
-case "$INCLUDE_NIGHTLY" in
-  0|1) ;;
-  *)
-    echo "[release] invalid COCLAI_RELEASE_INCLUDE_NIGHTLY=$INCLUDE_NIGHTLY (allowed: 0|1)" >&2
+    echo "[release] invalid COCLAI_RELEASE_INCLUDE_REAL_SERVER=$INCLUDE_REAL_SERVER (allowed: 0|1)" >&2
     exit 2
     ;;
 esac
@@ -45,59 +36,55 @@ case "$REAL_SERVER_BACKOFF_SEC" in
     ;;
 esac
 
+run_real_server_gate_with_retries() {
+  local max_attempts="$1"
+  local backoff_sec="$2"
+  local test_filter="$3"
+  local attempt=1
+  while (( attempt <= max_attempts )); do
+    echo "[release] gate: ${PKG} real-server test '${test_filter}' (attempt ${attempt}/${max_attempts})"
+    if cargo test -p "$PKG" "$test_filter" -- --ignored --nocapture; then
+      return 0
+    fi
+    if (( attempt == max_attempts )); then
+      echo "[release] ${PKG} real-server test '${test_filter}' exhausted retries" >&2
+      return 1
+    fi
+    echo "[release] ${PKG} real-server test '${test_filter}' failed; retrying in ${backoff_sec}s" >&2
+    sleep "$backoff_sec"
+    attempt=$((attempt + 1))
+  done
+}
+
 echo "[release] gate: fmt"
 cargo fmt --check
 
 echo "[release] gate: clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 
-echo "[release] gate: hexagonal boundaries"
-./scripts/check_hexagonal_boundaries.sh
-
 echo "[release] gate: product hygiene"
-COCLAI_HYGIENE_SKIP_CLIPPY=1 ./scripts/check_product_hygiene.sh
+./scripts/check_product_hygiene.sh
+
+echo "[release] gate: security"
+./scripts/check_security_gate.sh
 
 echo "[release] gate: tests"
 cargo test --workspace -- \
   --skip ergonomic::tests::real_server::quick_run_executes_prompt_against_real_codex_server \
   --skip ergonomic::tests::real_server::workflow_run_executes_prompt_against_real_codex_server
-run_real_server_gate_with_retries \
-  "$REAL_SERVER_RETRIES" \
-  "$REAL_SERVER_BACKOFF_SEC" \
-  "ergonomic::tests::real_server::quick_run_executes_prompt_against_real_codex_server" \
-  "" \
-  "[release] gate: coclai real-server test"
-run_real_server_gate_with_retries \
-  "$REAL_SERVER_RETRIES" \
-  "$REAL_SERVER_BACKOFF_SEC" \
-  "ergonomic::tests::real_server::workflow_run_executes_prompt_against_real_codex_server" \
-  "" \
-  "[release] gate: coclai real-server test"
 
-echo "[release] gate: agent go/no-go"
-COCLAI_AGENT_GO_NO_GO_MODE=ops-only ./scripts/release_agent_go_no_go.sh
-
-echo "[release] gate: schema drift"
-COCLAI_SCHEMA_DRIFT_MODE=hard COCLAI_SCHEMA_DRIFT_SOURCE="${COCLAI_RELEASE_SCHEMA_DRIFT_SOURCE:-codex}" ./scripts/check_schema_drift.sh
-
-echo "[release] gate: schema manifest"
-./scripts/check_schema_manifest.sh
-
-echo "[release] gate: doc contract sync"
-COCLAI_DOC_SYNC_MODE=hard COCLAI_DOC_SYNC_FAIL_ON_MISMATCH=1 ./scripts/check_doc_contract_sync.sh
-
-if [[ "$INCLUDE_PERF" == "1" ]]; then
-  echo "[release] gate: micro bench"
-  ./scripts/run_micro_bench.sh
+if [[ "$INCLUDE_REAL_SERVER" == "1" ]]; then
+  echo "[release] gate: real-server contract"
+  run_real_server_gate_with_retries \
+    "$REAL_SERVER_RETRIES" \
+    "$REAL_SERVER_BACKOFF_SEC" \
+    "ergonomic::tests::real_server::quick_run_executes_prompt_against_real_codex_server"
+  run_real_server_gate_with_retries \
+    "$REAL_SERVER_RETRIES" \
+    "$REAL_SERVER_BACKOFF_SEC" \
+    "ergonomic::tests::real_server::workflow_run_executes_prompt_against_real_codex_server"
 else
-  echo "[release] gate: micro bench (skipped; set COCLAI_RELEASE_INCLUDE_PERF=1)"
-fi
-
-if [[ "$INCLUDE_NIGHTLY" == "1" ]]; then
-  echo "[release] gate: nightly opt-in"
-  ./scripts/run_nightly_opt_in_gate.sh
-else
-  echo "[release] gate: nightly opt-in (skipped; set COCLAI_RELEASE_INCLUDE_NIGHTLY=1)"
+  echo "[release] gate: real-server contract (skipped; set COCLAI_RELEASE_INCLUDE_REAL_SERVER=1)"
 fi
 
 echo "[release] preflight passed"

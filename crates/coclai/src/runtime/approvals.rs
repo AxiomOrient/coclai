@@ -66,17 +66,9 @@ pub fn is_known_server_request_method(method: &str) -> bool {
     )
 }
 
-fn is_legacy_server_request_method(method: &str) -> bool {
-    matches!(method, "applyPatchApproval" | "execCommandApproval")
-}
-
 /// Decide whether a server request should be queued or auto-declined.
 /// Allocation: none. Complexity: O(1).
 pub fn route_server_request(method: &str, auto_decline_unknown: bool) -> ServerRequestRoute {
-    if is_legacy_server_request_method(method) {
-        return ServerRequestRoute::AutoDecline;
-    }
-
     if auto_decline_unknown && !is_known_server_request_method(method) {
         ServerRequestRoute::AutoDecline
     } else {
@@ -116,11 +108,5 @@ mod tests {
     fn routes_unknown_method_to_queue_when_auto_decline_disabled() {
         let route = route_server_request("item/unknown/requestApproval", false);
         assert_eq!(route, ServerRequestRoute::Queue);
-    }
-
-    #[test]
-    fn routes_legacy_method_to_auto_decline_even_when_unknown_queue_enabled() {
-        let route = route_server_request("applyPatchApproval", false);
-        assert_eq!(route, ServerRequestRoute::AutoDecline);
     }
 }

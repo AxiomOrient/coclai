@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(test)]
+use std::cell::Cell;
 
 use super::models::{
     apply_doc_patch, compute_revision, map_patch_conflict, validate_doc_patch, ArtifactMeta,
@@ -12,19 +14,26 @@ use crate::runtime::core::Runtime;
 use crate::runtime::errors::RuntimeError;
 use crate::runtime::events::Envelope;
 use crate::runtime::rpc_contract::methods as events;
+use crate::runtime::turn_lifecycle::{
+    collect_turn_terminal_with_limits, interrupt_turn_best_effort_with_timeout, TurnCollectError,
+};
 use crate::runtime::turn_output::{
     parse_thread_id, parse_turn_id, TurnStreamCollector, TurnTerminalEvent,
 };
 use serde_json::json;
-use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
-use tokio::time::{timeout, Duration, Instant};
+use tokio::time::Duration;
 
 const DEFAULT_ARTIFACT_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Medium;
 const MAX_TURN_EVENT_SCAN: usize = 20_000;
 const TURN_OUTPUT_TIMEOUT: Duration = Duration::from_secs(120);
 const INTERRUPT_RPC_TIMEOUT: Duration = Duration::from_millis(500);
 const TURN_OUTPUT_FIELDS: [&str; 1] = ["output"];
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_TURN_START_PAYLOAD_SERIALIZE_FAILURE: Cell<bool> = const { Cell::new(false) };
+}
 
 // --- from orchestrator.rs ---
 
@@ -230,7 +239,17 @@ pub(crate) async fn run_turn_and_collect_output(
     let turn_start_result = runtime.call_raw(events::TURN_START, turn_params).await?;
     let turn_id = parse_turn_id(&turn_start_result);
 
-    if let Some(output) = extract_direct_output_candidate(&turn_start_result)? {
+    let direct_output = match extract_direct_output_candidate(&turn_start_result) {
+        Ok(candidate) => candidate,
+        Err(err) => {
+            if let Some(target_turn_id) = turn_id.as_deref() {
+                interrupt_turn_best_effort(runtime, thread_id, target_turn_id).await;
+            }
+            return Err(err);
+        }
+    };
+
+    if let Some(output) = direct_output {
         return Ok((turn_id, output));
     }
 
@@ -250,8 +269,7 @@ pub(crate) async fn run_turn_and_collect_output(
 }
 
 async fn interrupt_turn_best_effort(runtime: &Runtime, thread_id: &str, turn_id: &str) {
-    let _ = runtime
-        .turn_interrupt_with_timeout(thread_id, turn_id, INTERRUPT_RPC_TIMEOUT)
+    interrupt_turn_best_effort_with_timeout(runtime, thread_id, turn_id, INTERRUPT_RPC_TIMEOUT)
         .await;
 }
 
@@ -277,70 +295,54 @@ pub(crate) async fn collect_turn_output_from_live_with_limits(
     max_turn_event_scan: usize,
     wait_timeout: Duration,
 ) -> Result<Value, DomainError> {
-    let deadline = Instant::now() + wait_timeout;
-    let mut turn_event_budget = max_turn_event_scan;
-    let mut completed = false;
     let mut stream = TurnStreamCollector::new(thread_id, turn_id);
     let mut output_from_event: Option<Value> = None;
 
-    while turn_event_budget > 0 {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(DomainError::Runtime(RuntimeError::Timeout));
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        let envelope = match timeout(remaining, live_rx.recv()).await {
-            Ok(Ok(envelope)) => envelope,
-            Ok(Err(RecvError::Lagged(_))) => continue,
-            Ok(Err(RecvError::Closed)) => {
-                return Err(DomainError::Runtime(RuntimeError::Internal(format!(
-                    "live stream closed while waiting turn output: {}",
-                    RecvError::Closed
-                ))));
+    let terminal = collect_turn_terminal_with_limits::<DomainError, _, _, _>(
+        live_rx,
+        &mut stream,
+        max_turn_event_scan,
+        wait_timeout,
+        |envelope| {
+            if output_from_event.is_none() {
+                let params = envelope.json.get("params").cloned().unwrap_or(Value::Null);
+                output_from_event = extract_output_candidate_from_params(&params)?;
             }
-            Err(_) => return Err(DomainError::Runtime(RuntimeError::Timeout)),
-        };
-
-        if !stream.is_target_envelope(&envelope) {
-            continue;
-        }
-        turn_event_budget = turn_event_budget.saturating_sub(1);
-
-        if output_from_event.is_none() {
-            let params = envelope.json.get("params").cloned().unwrap_or(Value::Null);
-            output_from_event = extract_output_candidate_from_params(&params)?;
-        }
-
-        match stream.push_envelope(&envelope) {
-            Some(TurnTerminalEvent::Completed) => {
-                completed = true;
-                break;
-            }
-            Some(TurnTerminalEvent::Failed) => {
-                return Err(DomainError::Validation(format!(
-                    "turn failed while collecting output: turn_id={turn_id}"
-                )));
-            }
-            Some(TurnTerminalEvent::Interrupted) | Some(TurnTerminalEvent::Cancelled) => {
-                return Err(DomainError::Validation(format!(
-                    "turn interrupted while collecting output: turn_id={turn_id}"
-                )));
-            }
-            None => {}
-        }
-    }
-
-    if !completed && turn_event_budget == 0 {
-        return Err(DomainError::Parse(format!(
+            Ok(())
+        },
+        |_| async { Ok(None) },
+    )
+    .await
+    .map_err(|err| match err {
+        TurnCollectError::Timeout => DomainError::Runtime(RuntimeError::Timeout),
+        TurnCollectError::StreamClosed => DomainError::Runtime(RuntimeError::Internal(format!(
+            "live stream closed while waiting turn output: {}",
+            tokio::sync::broadcast::error::RecvError::Closed
+        ))),
+        TurnCollectError::EventBudgetExceeded => DomainError::Parse(format!(
             "turn output scan exceeded event budget: turn_id={turn_id}"
-        )));
-    }
+        )),
+        TurnCollectError::TargetEnvelope(err) | TurnCollectError::LagProbe(err) => err,
+    })?
+    .0;
 
-    if let Some(output) = output_from_event {
-        return Ok(output);
+    match terminal {
+        TurnTerminalEvent::Completed => {
+            if let Some(output) = output_from_event {
+                Ok(output)
+            } else {
+                parse_json_output_text(stream.assistant_text())
+            }
+        }
+        TurnTerminalEvent::Failed => Err(DomainError::Validation(format!(
+            "turn failed while collecting output: turn_id={turn_id}"
+        ))),
+        TurnTerminalEvent::Interrupted | TurnTerminalEvent::Cancelled => {
+            Err(DomainError::Validation(format!(
+                "turn interrupted while collecting output: turn_id={turn_id}"
+            )))
+        }
     }
-
-    parse_json_output_text(stream.assistant_text())
 }
 
 fn extract_direct_output_candidate(
@@ -571,7 +573,11 @@ struct SandboxPolicyPreset {
 
 /// Build turn/start params with fixed safe policy.
 /// Side effects: none. Allocation: Serialized directly to JSON Value.
-pub fn build_turn_start_params(thread_id: &str, prompt: &str, spec: &ArtifactTaskSpec) -> Value {
+pub fn build_turn_start_params(
+    thread_id: &str,
+    prompt: &str,
+    spec: &ArtifactTaskSpec,
+) -> Result<Value, DomainError> {
     let effort = spec.effort.unwrap_or(DEFAULT_ARTIFACT_REASONING_EFFORT);
 
     let payload = ArtifactTurnStartPayload {
@@ -590,7 +596,35 @@ pub fn build_turn_start_params(thread_id: &str, prompt: &str, spec: &ArtifactTas
         output_schema: &spec.output_schema,
     };
 
-    serde_json::to_value(&payload).unwrap_or(Value::Null)
+    serialize_turn_start_payload(&payload)
+}
+
+#[cfg(test)]
+pub(crate) fn debug_with_forced_turn_start_params_serialization_failure<T>(
+    enabled: bool,
+    f: impl FnOnce() -> T,
+) -> T {
+    FORCE_TURN_START_PAYLOAD_SERIALIZE_FAILURE.with(|flag| {
+        let previous = flag.replace(enabled);
+        let outcome = f();
+        flag.set(previous);
+        outcome
+    })
+}
+
+fn serialize_turn_start_payload(
+    payload: &ArtifactTurnStartPayload<'_>,
+) -> Result<Value, DomainError> {
+    #[cfg(test)]
+    if FORCE_TURN_START_PAYLOAD_SERIALIZE_FAILURE.with(|flag| flag.get()) {
+        return Err(DomainError::Validation(
+            "serialize turn/start payload failed: forced test hook".to_owned(),
+        ));
+    }
+
+    serde_json::to_value(payload).map_err(|err| {
+        DomainError::Validation(format!("serialize turn/start payload failed: {err}"))
+    })
 }
 
 pub(crate) fn extract_output_json(

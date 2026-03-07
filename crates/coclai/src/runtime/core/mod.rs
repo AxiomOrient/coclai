@@ -28,6 +28,7 @@ type PendingResult = Result<Value, RpcError>;
 mod approval;
 mod config;
 mod dispatch;
+pub(crate) mod io_policy;
 mod lifecycle;
 mod rpc;
 mod rpc_io;

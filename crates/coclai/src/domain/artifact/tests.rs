@@ -195,6 +195,20 @@ for line in sys.stdin:
     if method == "turn/start":
         thread_id = params.get("threadId", "thr_art")
         turn_id = "turn_hot"
+        input_items = params.get("input") or []
+        input_text = ""
+        if len(input_items) > 0 and isinstance(input_items[0], dict):
+            input_text = input_items[0].get("text") or ""
+        if "DIRECT_OUTPUT_PARSE_FAIL" in input_text:
+            sys.stdout.write(json.dumps({
+                "id": rpc_id,
+                "result": {
+                    "turn": {"id": turn_id},
+                    "output": "{not-json"
+                }
+            }) + "\n")
+            sys.stdout.flush()
+            continue
         sys.stdout.write(json.dumps({"id": rpc_id, "result": {"turn": {"id": turn_id}}}) + "\n")
         for _ in range(21050):
             sys.stdout.write(json.dumps({
@@ -495,9 +509,12 @@ fn envelope_for_turn(method: &str, thread_id: &str, turn_id: &str, params: Value
     }
 }
 
-#[path = "tests/collect_output.rs"]
-mod collect_output;
-#[path = "tests/runtime_tasks.rs"]
-mod runtime_tasks;
+// Unit: pure document transforms/store invariants.
 #[path = "tests/unit_core.rs"]
 mod unit_core;
+// Contract: turn output collection/terminal semantics.
+#[path = "tests/collect_output.rs"]
+mod collect_output;
+// Integration: runtime + store task execution flows.
+#[path = "tests/runtime_tasks.rs"]
+mod runtime_tasks;

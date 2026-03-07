@@ -24,6 +24,7 @@ impl WorkflowConfig {
     /// - runtime discovery via `ClientConfig::new()`
     /// - model unset, effort medium, approval never, sandbox read-only
     /// - cwd normalized to absolute path without filesystem existence checks
+    ///   (non-utf8 absolute paths fall back to caller-provided UTF-8 input without lossy conversion)
     pub fn new(cwd: impl Into<String>) -> Self {
         let normalized_cwd = absolutize_cwd_without_fs_checks(&cwd.into());
         Self {

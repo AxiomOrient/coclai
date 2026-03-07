@@ -8,6 +8,9 @@ mod thread_views;
 
 pub use input::TextElement;
 pub use input::{ByteRange, InputItem, PromptAttachment, ThreadId, TurnId};
+pub(crate) use policies::{
+    sandbox_policy_to_wire_value, summarize_sandbox_policy, summarize_sandbox_policy_wire_value,
+};
 pub use policies::{
     ApprovalPolicy, ExternalNetworkAccess, ReasoningEffort, SandboxPolicy, SandboxPreset,
     DEFAULT_REASONING_EFFORT,

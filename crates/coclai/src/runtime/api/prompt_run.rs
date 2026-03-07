@@ -2,22 +2,43 @@ use std::time::Duration;
 
 use crate::plugin::HookPhase;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::time::{timeout, Instant};
 
 use crate::runtime::core::Runtime;
 use crate::runtime::errors::{RpcError, RuntimeError};
 use crate::runtime::hooks::{PreHookDecision, RuntimeHookConfig};
+use crate::runtime::rpc_contract::{methods, RpcValidationMode};
+use crate::runtime::turn_lifecycle::{
+    collect_turn_terminal_with_limits, interrupt_turn_best_effort_detached, LaggedTurnTerminal,
+    TurnCollectError,
+};
 use crate::runtime::turn_output::{TurnStreamCollector, TurnTerminalEvent};
 
 use super::attachment_validation::validate_prompt_attachments;
 use super::flow::{
     apply_pre_hook_actions_to_prompt, build_hook_context, extract_assistant_text_from_turn,
-    interrupt_turn_best_effort, result_status, HookContextInput, HookExecutionState,
-    LaggedTurnTerminal, PromptMutationState,
+    result_status, HookContextInput, HookExecutionState, PromptMutationState,
 };
 use super::turn_error::{extract_turn_error_signal, PromptTurnErrorSignal};
-use super::wire::{thread_start_params_from_prompt, turn_start_params_from_prompt};
+use super::wire::{
+    deserialize_result, serialize_params, thread_start_params_from_prompt,
+    turn_start_params_from_prompt,
+};
 use super::*;
+
+#[derive(Clone, Copy)]
+enum PromptRunTarget<'a> {
+    OpenOrResume(Option<&'a str>),
+    Loaded(&'a str),
+}
+
+impl<'a> PromptRunTarget<'a> {
+    fn hook_thread_id(self) -> Option<&'a str> {
+        match self {
+            Self::OpenOrResume(thread_id) => thread_id,
+            Self::Loaded(thread_id) => Some(thread_id),
+        }
+    }
+}
 
 impl Runtime {
     /// Run one prompt with safe default policies using only cwd + prompt.
@@ -69,35 +90,79 @@ impl Runtime {
             .await
     }
 
+    pub(crate) async fn run_prompt_on_loaded_thread_with_hooks(
+        &self,
+        thread_id: &str,
+        p: PromptRunParams,
+        scoped_hooks: Option<&RuntimeHookConfig>,
+    ) -> Result<PromptRunResult, PromptRunError> {
+        self.run_prompt_with_hook_scaffold(PromptRunTarget::Loaded(thread_id), p, scoped_hooks)
+            .await
+    }
+
     async fn run_prompt_target_with_hooks(
         &self,
         thread_id: Option<&str>,
         p: PromptRunParams,
         scoped_hooks: Option<&RuntimeHookConfig>,
     ) -> Result<PromptRunResult, PromptRunError> {
+        self.run_prompt_with_hook_scaffold(
+            PromptRunTarget::OpenOrResume(thread_id),
+            p,
+            scoped_hooks,
+        )
+        .await
+    }
+
+    async fn run_prompt_with_hook_scaffold(
+        &self,
+        target: PromptRunTarget<'_>,
+        p: PromptRunParams,
+        scoped_hooks: Option<&RuntimeHookConfig>,
+    ) -> Result<PromptRunResult, PromptRunError> {
         if !self.hooks_enabled_with(scoped_hooks) {
             return self
-                .run_prompt_entry(thread_id, p, None, scoped_hooks)
+                .run_prompt_target_entry_dispatch(target, p, None, scoped_hooks)
                 .await;
         }
 
+        let fallback_thread_id = target.hook_thread_id();
         let (p, mut hook_state, run_cwd, run_model) = self
-            .prepare_prompt_pre_run_hooks(p, thread_id, scoped_hooks)
+            .prepare_prompt_pre_run_hooks(p, fallback_thread_id, scoped_hooks)
             .await;
         let result = self
-            .run_prompt_entry(thread_id, p, Some(&mut hook_state), scoped_hooks)
+            .run_prompt_target_entry_dispatch(target, p, Some(&mut hook_state), scoped_hooks)
             .await;
         self.finalize_prompt_run_hooks(
             &mut hook_state,
             run_cwd.as_str(),
             run_model.as_deref(),
-            thread_id,
+            fallback_thread_id,
             &result,
             scoped_hooks,
         )
         .await;
         self.publish_hook_report(hook_state.report);
         result
+    }
+
+    async fn run_prompt_target_entry_dispatch(
+        &self,
+        target: PromptRunTarget<'_>,
+        p: PromptRunParams,
+        hook_state: Option<&mut HookExecutionState>,
+        scoped_hooks: Option<&RuntimeHookConfig>,
+    ) -> Result<PromptRunResult, PromptRunError> {
+        match target {
+            PromptRunTarget::OpenOrResume(thread_id) => {
+                self.run_prompt_entry(thread_id, p, hook_state, scoped_hooks)
+                    .await
+            }
+            PromptRunTarget::Loaded(thread_id) => {
+                self.run_prompt_on_loaded_thread_entry(thread_id, p, hook_state, scoped_hooks)
+                    .await
+            }
+        }
     }
 
     async fn open_prompt_thread(
@@ -122,6 +187,20 @@ impl Runtime {
         validate_prompt_attachments(&p.cwd, &p.attachments).await?;
         let effort = p.effort.unwrap_or(DEFAULT_REASONING_EFFORT);
         let thread = self.open_prompt_thread(thread_id, &p).await?;
+        self.run_prompt_on_thread(thread, p, effort, hook_state, scoped_hooks)
+            .await
+    }
+
+    async fn run_prompt_on_loaded_thread_entry(
+        &self,
+        thread_id: &str,
+        p: PromptRunParams,
+        hook_state: Option<&mut HookExecutionState>,
+        scoped_hooks: Option<&RuntimeHookConfig>,
+    ) -> Result<PromptRunResult, PromptRunError> {
+        validate_prompt_attachments(&p.cwd, &p.attachments).await?;
+        let effort = p.effort.unwrap_or(DEFAULT_REASONING_EFFORT);
+        let thread = self.loaded_thread_handle(thread_id);
         self.run_prompt_on_thread(thread, p, effort, hook_state, scoped_hooks)
             .await
     }
@@ -274,97 +353,99 @@ impl Runtime {
         turn_id: &str,
         timeout_duration: Duration,
     ) -> Result<String, PromptRunError> {
+        const INTERRUPT_RPC_TIMEOUT: Duration = Duration::from_millis(500);
+
         let mut stream = TurnStreamCollector::new(&thread.thread_id, turn_id);
         let mut last_turn_error: Option<PromptTurnErrorSignal> = None;
-        let mut lagged_completed_text: Option<String> = None;
-        let deadline = Instant::now() + timeout_duration;
-        let terminal = loop {
-            let now = Instant::now();
-            if now >= deadline {
-                interrupt_turn_best_effort(thread, turn_id);
-                break Err(PromptRunError::Timeout(timeout_duration));
-            }
-            let remaining = deadline.saturating_duration_since(now);
+        let collected = collect_turn_terminal_with_limits(
+            &mut live_rx,
+            &mut stream,
+            usize::MAX,
+            timeout_duration,
+            |envelope| {
+                if let Some(err) = extract_turn_error_signal(envelope) {
+                    last_turn_error = Some(err);
+                }
+                Ok::<(), RpcError>(())
+            },
+            |lag_probe_budget| async move {
+                self.read_turn_terminal_after_lag(&thread.thread_id, turn_id, lag_probe_budget)
+                    .await
+            },
+        )
+        .await;
 
-            let envelope = match timeout(remaining, live_rx.recv()).await {
-                Ok(Ok(v)) => v,
-                Ok(Err(RecvError::Lagged(_))) => {
-                    match self
-                        .read_turn_terminal_after_lag(&thread.thread_id, turn_id)
-                        .await
-                    {
-                        Ok(Some(LaggedTurnTerminal::Completed { assistant_text })) => {
-                            lagged_completed_text = assistant_text;
-                            break Ok(());
-                        }
-                        Ok(Some(LaggedTurnTerminal::Failed { message })) => {
-                            if let Some(err) = last_turn_error.clone() {
-                                break Err(PromptRunError::TurnFailedWithContext(
-                                    err.into_failure(PromptTurnTerminalState::Failed),
-                                ));
-                            }
-                            if let Some(message) = message {
-                                break Err(PromptRunError::TurnFailedWithContext(
-                                    PromptTurnFailure {
-                                        terminal_state: PromptTurnTerminalState::Failed,
-                                        source_method: "thread/read".to_owned(),
-                                        code: None,
-                                        message,
-                                    },
-                                ));
-                            }
-                            break Err(PromptRunError::TurnFailed);
-                        }
-                        Ok(Some(LaggedTurnTerminal::Interrupted)) => {
-                            break Err(PromptRunError::TurnInterrupted);
-                        }
-                        Ok(None) => continue,
-                        Err(err) => break Err(PromptRunError::Rpc(err)),
-                    }
-                }
-                Ok(Err(RecvError::Closed)) => {
-                    break Err(PromptRunError::Runtime(RuntimeError::Internal(format!(
-                        "live stream closed: {}",
-                        RecvError::Closed
-                    ))));
-                }
-                Err(_) => {
-                    interrupt_turn_best_effort(thread, turn_id);
-                    break Err(PromptRunError::Timeout(timeout_duration));
-                }
-            };
+        let (terminal, lagged_terminal) = match collected {
+            Ok(result) => result,
+            Err(TurnCollectError::Timeout) => {
+                interrupt_turn_best_effort_detached(
+                    thread.runtime().clone(),
+                    thread.thread_id.clone(),
+                    turn_id.to_owned(),
+                    INTERRUPT_RPC_TIMEOUT,
+                );
+                return Err(PromptRunError::Timeout(timeout_duration));
+            }
+            Err(TurnCollectError::StreamClosed) => {
+                return Err(PromptRunError::Runtime(RuntimeError::Internal(format!(
+                    "live stream closed: {}",
+                    RecvError::Closed
+                ))));
+            }
+            Err(TurnCollectError::EventBudgetExceeded) => {
+                return Err(PromptRunError::Runtime(RuntimeError::Internal(
+                    "turn event budget exhausted while collecting assistant output".to_owned(),
+                )));
+            }
+            Err(TurnCollectError::TargetEnvelope(err)) => return Err(PromptRunError::Rpc(err)),
+            Err(TurnCollectError::LagProbe(RpcError::Timeout)) => {
+                interrupt_turn_best_effort_detached(
+                    thread.runtime().clone(),
+                    thread.thread_id.clone(),
+                    turn_id.to_owned(),
+                    INTERRUPT_RPC_TIMEOUT,
+                );
+                return Err(PromptRunError::Timeout(timeout_duration));
+            }
+            Err(TurnCollectError::LagProbe(err)) => return Err(PromptRunError::Rpc(err)),
+        };
 
-            if !stream.is_target_envelope(&envelope) {
-                continue;
-            }
-            if let Some(err) = extract_turn_error_signal(&envelope) {
-                last_turn_error = Some(err);
-            }
-
-            match stream.push_envelope(&envelope) {
-                Some(TurnTerminalEvent::Completed) => break Ok(()),
-                Some(TurnTerminalEvent::Failed) => {
-                    if let Some(err) = last_turn_error.clone() {
-                        break Err(PromptRunError::TurnFailedWithContext(
-                            err.into_failure(PromptTurnTerminalState::Failed),
-                        ));
-                    }
-                    break Err(PromptRunError::TurnFailed);
-                }
-                Some(TurnTerminalEvent::Interrupted) | Some(TurnTerminalEvent::Cancelled) => {
-                    break Err(PromptRunError::TurnInterrupted);
-                }
-                None => {}
-            }
+        let lagged_completed_text = match lagged_terminal.as_ref() {
+            Some(LaggedTurnTerminal::Completed { assistant_text }) => assistant_text.clone(),
+            _ => None,
         };
 
         match terminal {
-            Err(err) => Err(err),
-            Ok(()) => Self::finalize_prompt_turn_assistant_text(
+            TurnTerminalEvent::Completed => Self::finalize_prompt_turn_assistant_text(
                 stream.into_assistant_text(),
                 lagged_completed_text,
                 last_turn_error,
             ),
+            TurnTerminalEvent::Failed => {
+                if let Some(err) = last_turn_error {
+                    Err(PromptRunError::TurnFailedWithContext(
+                        err.into_failure(PromptTurnTerminalState::Failed),
+                    ))
+                } else if let Some(LaggedTurnTerminal::Failed { message }) =
+                    lagged_terminal.as_ref()
+                {
+                    if let Some(message) = message.clone() {
+                        Err(PromptRunError::TurnFailedWithContext(PromptTurnFailure {
+                            terminal_state: PromptTurnTerminalState::Failed,
+                            source_method: "thread/read".to_owned(),
+                            code: None,
+                            message,
+                        }))
+                    } else {
+                        Err(PromptRunError::TurnFailed)
+                    }
+                } else {
+                    Err(PromptRunError::TurnFailed)
+                }
+            }
+            TurnTerminalEvent::Interrupted | TurnTerminalEvent::Cancelled => {
+                Err(PromptRunError::TurnInterrupted)
+            }
         }
     }
 
@@ -400,13 +481,24 @@ impl Runtime {
         &self,
         thread_id: &str,
         turn_id: &str,
+        timeout_duration: Duration,
     ) -> Result<Option<LaggedTurnTerminal>, RpcError> {
-        let response = self
-            .thread_read(ThreadReadParams {
+        let params = serialize_params(
+            methods::THREAD_READ,
+            &ThreadReadParams {
                 thread_id: thread_id.to_owned(),
                 include_turns: Some(true),
-            })
+            },
+        )?;
+        let response = self
+            .call_validated_with_mode_and_timeout(
+                methods::THREAD_READ,
+                params,
+                RpcValidationMode::KnownMethods,
+                timeout_duration,
+            )
             .await?;
+        let response: ThreadReadResponse = deserialize_result(methods::THREAD_READ, response)?;
 
         let Some(turn) = response.thread.turns.iter().find(|turn| turn.id == turn_id) else {
             return Ok(None);

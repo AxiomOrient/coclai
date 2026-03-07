@@ -9,6 +9,13 @@ use super::lifecycle::{detach_generation, spawn_connection_generation};
 use super::state_projection::state_set_connection;
 use super::{now_millis, RestartPolicy, RuntimeInner};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransportCloseKind {
+    CleanExit,
+    CrashExit,
+    Unknown,
+}
+
 pub(super) async fn start_supervisor_task(inner: &Arc<RuntimeInner>) {
     let supervisor_inner = Arc::clone(inner);
     let supervisor_task = tokio::spawn(supervisor_loop(supervisor_inner));
@@ -61,7 +68,8 @@ fn pseudo_random_u64() -> u64 {
 }
 
 pub(super) async fn supervisor_loop(inner: Arc<RuntimeInner>) {
-    let mut restarts = 0u32;
+    let mut restart_attempts = 0u32;
+    let mut generation_started_at_ms = now_millis();
 
     loop {
         if !wait_for_transport_close_signal(&inner).await {
@@ -72,6 +80,7 @@ pub(super) async fn supervisor_loop(inner: Arc<RuntimeInner>) {
             break;
         }
 
+        let close_kind = classify_transport_close(&inner).await;
         inner.counters.initialized.store(false, Ordering::Release);
         let generation = inner.counters.generation.load(Ordering::Acquire);
         if detach_generation(&inner).await.is_err() {
@@ -89,15 +98,29 @@ pub(super) async fn supervisor_loop(inner: Arc<RuntimeInner>) {
                 base_backoff_ms,
                 max_backoff_ms,
             } => {
-                if restarts >= max_restarts {
+                if close_kind == TransportCloseKind::CleanExit {
+                    state_set_connection(&inner, ConnectionState::Dead);
+                    break;
+                }
+
+                let uptime_ms = now_millis().saturating_sub(generation_started_at_ms);
+                if uptime_ms >= inner.spec.supervisor_cfg.restart_budget_reset_ms as i64 {
+                    restart_attempts = 0;
+                }
+
+                if restart_attempts >= max_restarts {
                     state_set_connection(&inner, ConnectionState::Dead);
                     break;
                 }
 
                 state_set_connection(&inner, ConnectionState::Restarting { generation });
-                let delay = compute_restart_delay(restarts, base_backoff_ms, max_backoff_ms);
-                restarts = restarts.saturating_add(1);
-                sleep(delay).await;
+                let delay =
+                    compute_restart_delay(restart_attempts, base_backoff_ms, max_backoff_ms);
+                restart_attempts = restart_attempts.saturating_add(1);
+                tokio::select! {
+                    _ = sleep(delay) => {}
+                    _ = inner.io.shutdown_signal.notified() => break,
+                }
 
                 if inner.counters.shutting_down.load(Ordering::Acquire) {
                     break;
@@ -110,7 +133,22 @@ pub(super) async fn supervisor_loop(inner: Arc<RuntimeInner>) {
                     state_set_connection(&inner, ConnectionState::Dead);
                     break;
                 }
+                generation_started_at_ms = now_millis();
             }
         }
+    }
+}
+
+async fn classify_transport_close(inner: &Arc<RuntimeInner>) -> TransportCloseKind {
+    let mut transport_guard = inner.tasks.transport.lock().await;
+    let Some(transport) = transport_guard.as_mut() else {
+        return TransportCloseKind::Unknown;
+    };
+
+    match transport.try_wait_exit() {
+        Ok(Some(status)) if status.success() => TransportCloseKind::CleanExit,
+        Ok(Some(_)) => TransportCloseKind::CrashExit,
+        Ok(None) => TransportCloseKind::Unknown,
+        Err(_) => TransportCloseKind::Unknown,
     }
 }

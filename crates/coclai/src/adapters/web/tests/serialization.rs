@@ -45,11 +45,11 @@ fn parse_turn_id_from_turn_result_supports_common_shapes() {
     );
     assert_eq!(
         wire::parse_turn_id_from_turn_result(&json!({"id":"turn_top"})),
-        Some("turn_top".to_owned())
+        None
     );
     assert_eq!(
         wire::parse_turn_id_from_turn_result(&json!("turn_raw")),
-        Some("turn_raw".to_owned())
+        None
     );
 }
 

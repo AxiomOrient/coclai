@@ -1,11 +1,30 @@
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{Map, Value};
 
 use crate::runtime::errors::RpcError;
+use crate::runtime::rpc_contract::payload_summary;
 
 use super::{
-    ApprovalPolicy, ByteRange, InputItem, PromptAttachment, SandboxPolicy, SandboxPreset,
-    TextElement, ThreadStartParams, TurnStartParams,
+    sandbox_policy_to_wire_value, summarize_sandbox_policy, ApprovalPolicy, ByteRange, InputItem,
+    PromptAttachment, TextElement, ThreadStartParams, TurnStartParams,
 };
+
+pub(super) fn serialize_params<T: Serialize>(method: &str, params: &T) -> Result<Value, RpcError> {
+    serde_json::to_value(params)
+        .map_err(|error| RpcError::InvalidRequest(format!("{method} invalid params: {error}")))
+}
+
+pub(super) fn deserialize_result<T: DeserializeOwned>(
+    method: &str,
+    response: Value,
+) -> Result<T, RpcError> {
+    let response_summary = payload_summary(&response);
+    serde_json::from_value(response).map_err(|error| {
+        RpcError::InvalidRequest(format!(
+            "{method} invalid result: {error}; response: {response_summary}"
+        ))
+    })
+}
 
 /// Enforce privileged sandbox escalation policy (SEC-004) for session-start/resume.
 /// High-risk sandbox usage requires:
@@ -16,7 +35,9 @@ pub(super) fn validate_thread_start_security(p: &ThreadStartParams) -> Result<()
     let Some(sandbox_policy) = p.sandbox_policy.as_ref() else {
         return Ok(());
     };
-    if !is_privileged_sandbox_policy(sandbox_policy) {
+    let policy_summary =
+        summarize_sandbox_policy(sandbox_policy).map_err(RpcError::InvalidRequest)?;
+    if !policy_summary.is_privileged() {
         return Ok(());
     }
     if !p.privileged_escalation_approved {
@@ -30,7 +51,10 @@ pub(super) fn validate_thread_start_security(p: &ThreadStartParams) -> Result<()
             "privileged sandbox requires non-never approval policy".to_owned(),
         ));
     }
-    if !has_explicit_scope(p.cwd.as_deref(), sandbox_policy) {
+    if !has_explicit_scope(
+        p.cwd.as_deref(),
+        policy_summary.has_non_empty_writable_roots(),
+    ) {
         return Err(RpcError::InvalidRequest(
             "privileged sandbox requires explicit scope via cwd or writable roots".to_owned(),
         ));
@@ -43,7 +67,9 @@ pub(super) fn validate_turn_start_security(p: &TurnStartParams) -> Result<(), Rp
     let Some(sandbox_policy) = p.sandbox_policy.as_ref() else {
         return Ok(());
     };
-    if !is_privileged_sandbox_policy(sandbox_policy) {
+    let policy_summary =
+        summarize_sandbox_policy(sandbox_policy).map_err(RpcError::InvalidRequest)?;
+    if !policy_summary.is_privileged() {
         return Ok(());
     }
     if !p.privileged_escalation_approved {
@@ -57,7 +83,10 @@ pub(super) fn validate_turn_start_security(p: &TurnStartParams) -> Result<(), Rp
             "privileged sandbox requires non-never approval policy".to_owned(),
         ));
     }
-    if !has_explicit_scope(p.cwd.as_deref(), sandbox_policy) {
+    if !has_explicit_scope(
+        p.cwd.as_deref(),
+        policy_summary.has_non_empty_writable_roots(),
+    ) {
         return Err(RpcError::InvalidRequest(
             "privileged sandbox requires explicit scope via cwd or writable roots".to_owned(),
         ));
@@ -65,45 +94,11 @@ pub(super) fn validate_turn_start_security(p: &TurnStartParams) -> Result<(), Rp
     Ok(())
 }
 
-fn is_privileged_sandbox_policy(policy: &SandboxPolicy) -> bool {
-    match policy {
-        SandboxPolicy::Preset(SandboxPreset::ReadOnly) => false,
-        SandboxPolicy::Preset(_) => true,
-        SandboxPolicy::Raw(raw) => !raw_policy_is_read_only(raw),
-    }
-}
-
-fn raw_policy_is_read_only(raw: &Value) -> bool {
-    let Some(raw_obj) = raw.as_object() else {
-        return false;
-    };
-    raw_obj.get("type").and_then(Value::as_str) == Some(SandboxPreset::ReadOnly.as_type_wire())
-}
-
-fn has_explicit_scope(cwd: Option<&str>, sandbox_policy: &SandboxPolicy) -> bool {
+fn has_explicit_scope(cwd: Option<&str>, has_non_empty_writable_roots: bool) -> bool {
     if cwd.is_some_and(|v| !v.trim().is_empty()) {
         return true;
     }
-    match sandbox_policy {
-        SandboxPolicy::Preset(SandboxPreset::WorkspaceWrite { writable_roots, .. }) => {
-            writable_roots.iter().any(|root| !root.trim().is_empty())
-        }
-        SandboxPolicy::Raw(raw) => raw_writable_roots_non_empty(raw),
-        _ => false,
-    }
-}
-
-fn raw_writable_roots_non_empty(raw: &Value) -> bool {
-    let Some(raw_obj) = raw.as_object() else {
-        return false;
-    };
-    let Some(roots) = raw_obj.get("writableRoots").and_then(Value::as_array) else {
-        return false;
-    };
-    roots
-        .iter()
-        .filter_map(Value::as_str)
-        .any(|root| !root.trim().is_empty())
+    has_non_empty_writable_roots
 }
 
 /// Map thread start parameters to wire JSON.
@@ -132,21 +127,10 @@ pub(super) fn thread_overrides_to_wire(p: &ThreadStartParams) -> Map<String, Val
         );
     }
     if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
-        match sandbox_policy {
-            SandboxPolicy::Preset(preset) => {
-                if let Some(legacy) = preset.as_legacy_wire() {
-                    params.insert("sandbox".to_owned(), Value::String(legacy.to_owned()));
-                } else {
-                    params.insert(
-                        "sandboxPolicy".to_owned(),
-                        sandbox_policy_to_wire(sandbox_policy),
-                    );
-                }
-            }
-            other => {
-                params.insert("sandboxPolicy".to_owned(), sandbox_policy_to_wire(other));
-            }
-        }
+        params.insert(
+            "sandboxPolicy".to_owned(),
+            sandbox_policy_to_wire_value(sandbox_policy),
+        );
     }
 
     params
@@ -175,7 +159,7 @@ pub(super) fn turn_start_params_to_wire(thread_id: &str, p: &TurnStartParams) ->
     if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
         params.insert(
             "sandboxPolicy".to_owned(),
-            sandbox_policy_to_wire(sandbox_policy),
+            sandbox_policy_to_wire_value(sandbox_policy),
         );
     }
     if let Some(model) = p.model.as_ref() {
@@ -320,46 +304,6 @@ fn text_element_to_wire(element: &TextElement) -> Value {
     Value::Object(obj)
 }
 
-fn sandbox_policy_to_wire(policy: &SandboxPolicy) -> Value {
-    match policy {
-        SandboxPolicy::Preset(preset) => sandbox_preset_to_wire(preset),
-        SandboxPolicy::Raw(value) => value.clone(),
-    }
-}
-
-fn sandbox_preset_to_wire(preset: &SandboxPreset) -> Value {
-    let mut value = Map::<String, Value>::new();
-    value.insert(
-        "type".to_owned(),
-        Value::String(preset.as_type_wire().to_owned()),
-    );
-    match preset {
-        SandboxPreset::ReadOnly | SandboxPreset::DangerFullAccess => {}
-        SandboxPreset::WorkspaceWrite {
-            writable_roots,
-            network_access,
-        } => {
-            value.insert(
-                "writableRoots".to_owned(),
-                Value::Array(
-                    writable_roots
-                        .iter()
-                        .map(|root| Value::String(root.clone()))
-                        .collect(),
-                ),
-            );
-            value.insert("networkAccess".to_owned(), Value::Bool(*network_access));
-        }
-        SandboxPreset::ExternalSandbox { network_access } => {
-            value.insert(
-                "networkAccess".to_owned(),
-                Value::String(network_access.as_wire().to_owned()),
-            );
-        }
-    }
-    Value::Object(value)
-}
-
 // ── Prompt → thread/turn param transformations ────────────────────────────
 // Pure functions: no self, no side effects. Allocation: one struct per call.
 
@@ -393,5 +337,46 @@ pub(super) fn turn_start_params_from_prompt(
         effort: Some(effort),
         summary: None,
         output_schema: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+    use serde_json::json;
+
+    use super::deserialize_result;
+    use crate::runtime::errors::RpcError;
+
+    #[derive(Debug, Deserialize)]
+    struct ExpectedResult {
+        ok: bool,
+    }
+
+    #[test]
+    fn deserialize_result_redacts_payload_values_on_parse_failure() {
+        let err = deserialize_result::<ExpectedResult>(
+            "thread/read",
+            json!({
+                "thread": {"id": "thr_1"},
+                "assistantText": "secret-output"
+            }),
+        )
+        .expect_err("parse must fail");
+
+        let RpcError::InvalidRequest(message) = err else {
+            panic!("expected invalid request");
+        };
+        assert!(message.contains("thread/read invalid result"));
+        assert!(message.contains("response: object(keys=[assistantText,thread])"));
+        assert!(!message.contains("secret-output"));
+        assert!(!message.contains("thr_1"));
+    }
+
+    #[test]
+    fn deserialize_result_succeeds_for_matching_shape() {
+        let result = deserialize_result::<ExpectedResult>("echo/test", json!({"ok": true}))
+            .expect("matching result");
+        assert!(result.ok);
     }
 }

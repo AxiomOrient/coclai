@@ -199,6 +199,7 @@ fn fs_store_rejects_stale_revision_on_save() {
     assert!(matches!(stale, StoreErr::Conflict { .. }));
 }
 
+#[cfg(unix)]
 #[test]
 fn fs_store_recovers_orphaned_lock_and_saves() {
     let temp = TempDir::new("runtime_artifact_store_orphaned_lock");
@@ -228,6 +229,36 @@ fn fs_store_recovers_orphaned_lock_and_saves() {
     let persisted = store.load_text(artifact_id).expect("load persisted");
     assert_eq!(persisted, next_text);
     assert!(!artifact_dir.join(".artifact.lock").exists());
+}
+
+#[cfg(not(unix))]
+#[test]
+fn fs_store_does_not_reap_unknown_owner_lock_after_age_threshold() {
+    let temp = TempDir::new("runtime_artifact_store_unknown_lock_owner");
+    let store = FsArtifactStore::new(&temp.root);
+    let artifact_id = "doc:unknown-lock-owner";
+
+    let artifact_dir = temp.root.join(artifact_key(artifact_id));
+    fs::create_dir_all(&artifact_dir).expect("create artifact dir");
+    fs::write(artifact_dir.join(".artifact.lock"), "999999:1\n").expect("write unknown-owner lock");
+
+    let err = store
+        .save_text(
+            artifact_id,
+            "v1\n",
+            SaveMeta {
+                task_kind: ArtifactTaskKind::DocGenerate,
+                thread_id: "seed".to_owned(),
+                turn_id: None,
+                previous_revision: None,
+                next_revision: compute_revision("v1\n"),
+            },
+        )
+        .expect_err("unknown-owner lock must not be stolen on non-unix");
+    match err {
+        StoreErr::Io(message) => assert!(message.contains("artifact lock timed out")),
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[test]
@@ -412,6 +443,34 @@ fn build_turn_start_params_defaults_effort_to_medium() {
         summary: None,
         output_schema: json!({"type":"object"}),
     };
-    let params = build_turn_start_params("thr_1", "prompt", &spec);
+    let params = build_turn_start_params("thr_1", "prompt", &spec).expect("build turn params");
     assert_eq!(params["effort"], "medium");
+}
+
+#[test]
+fn build_turn_start_params_surfaces_serialization_failure() {
+    let spec = ArtifactTaskSpec {
+        artifact_id: "doc:forced-serialize-failure".to_owned(),
+        kind: ArtifactTaskKind::Passthrough,
+        user_goal: "goal".to_owned(),
+        current_text: None,
+        constraints: vec![],
+        examples: vec![],
+        model: None,
+        effort: None,
+        summary: None,
+        output_schema: json!({"type":"object"}),
+    };
+
+    let err = debug_with_forced_turn_start_params_serialization_failure(true, || {
+        build_turn_start_params("thr_1", "prompt", &spec)
+    })
+    .expect_err("forced serializer failure must be surfaced");
+
+    match err {
+        DomainError::Validation(message) => {
+            assert!(message.contains("serialize turn/start payload failed"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }

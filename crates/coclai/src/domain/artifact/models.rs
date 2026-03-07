@@ -119,10 +119,7 @@ pub trait ArtifactStore: Send + Sync {
         new_text: &str,
         save_meta: SaveMeta,
         meta: ArtifactMeta,
-    ) -> Result<(), StoreErr> {
-        self.save_text(artifact_id, new_text, save_meta)?;
-        self.set_meta(artifact_id, meta)
-    }
+    ) -> Result<(), StoreErr>;
     fn get_meta(&self, artifact_id: &str) -> Result<ArtifactMeta, StoreErr>;
     fn set_meta(&self, artifact_id: &str, meta: ArtifactMeta) -> Result<(), StoreErr>;
 }

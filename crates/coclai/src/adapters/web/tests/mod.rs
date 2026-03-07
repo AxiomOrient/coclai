@@ -139,6 +139,7 @@ struct FakeWebAdapterState {
     turn_start_calls: Vec<Value>,
     archive_calls: Vec<String>,
     archive_failures_remaining: usize,
+    archive_block_on: Option<Arc<tokio::sync::Notify>>,
     approval_calls: Vec<(String, Value)>,
     pending_approval_ids: Vec<String>,
     take_stream_calls: usize,
@@ -156,6 +157,7 @@ impl Default for FakeWebAdapterState {
             turn_start_calls: Vec::new(),
             archive_calls: Vec::new(),
             archive_failures_remaining: 0,
+            archive_block_on: None,
             approval_calls: Vec::new(),
             pending_approval_ids: Vec::new(),
             take_stream_calls: 0,
@@ -217,10 +219,24 @@ impl WebPluginAdapter for FakeWebAdapter {
         thread_id: &'a str,
     ) -> WebAdapterFuture<'a, Result<(), WebError>> {
         Box::pin(async move {
-            let mut state = self.state.lock().expect("fake adapter state lock");
-            state.archive_calls.push(thread_id.to_owned());
-            if state.archive_failures_remaining > 0 {
-                state.archive_failures_remaining -= 1;
+            let (block_on, should_fail) = {
+                let mut state = self.state.lock().expect("fake adapter state lock");
+                state.archive_calls.push(thread_id.to_owned());
+                let block_on = state.archive_block_on.clone();
+                let should_fail = if state.archive_failures_remaining > 0 {
+                    state.archive_failures_remaining -= 1;
+                    true
+                } else {
+                    false
+                };
+                (block_on, should_fail)
+            };
+
+            if let Some(gate) = block_on {
+                gate.notified().await;
+            }
+
+            if should_fail {
                 return Err(WebError::Internal("forced archive failure".to_owned()));
             }
             Ok(())
@@ -407,8 +423,12 @@ async fn assert_no_thread_leak(
     }
 }
 
-mod approval_boundaries;
-mod approvals;
-mod contract_and_spawn;
+// Unit: pure serialization/parsing boundaries.
 mod serialization;
+// Contract: ownership/isolation and adapter contract guarantees.
+mod approval_boundaries;
+mod contract_and_spawn;
+// Integration: runtime-backed flow behavior.
+mod approvals;
+mod routing_observability;
 mod session_flows;

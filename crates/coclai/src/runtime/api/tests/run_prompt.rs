@@ -11,10 +11,12 @@ use super::support::{
     python_api_mock_process, python_session_mutation_probe_process,
     spawn_run_prompt_cross_thread_noise_runtime, spawn_run_prompt_effort_probe_runtime,
     spawn_run_prompt_error_runtime, spawn_run_prompt_interrupt_probe_runtime,
-    spawn_run_prompt_lagged_completion_runtime, spawn_run_prompt_mutation_probe_runtime,
-    spawn_run_prompt_runtime, spawn_run_prompt_runtime_with_hooks,
-    spawn_run_prompt_streaming_timeout_runtime, spawn_run_prompt_turn_failed_runtime,
-    MetadataCapturePostHook, PhasePatchPreHook, RecordingPostHook, RecordingPreHook,
+    spawn_run_prompt_lagged_completion_runtime,
+    spawn_run_prompt_lagged_completion_slow_thread_read_runtime,
+    spawn_run_prompt_mutation_probe_runtime, spawn_run_prompt_runtime,
+    spawn_run_prompt_runtime_with_hooks, spawn_run_prompt_streaming_timeout_runtime,
+    spawn_run_prompt_turn_failed_runtime, MetadataCapturePostHook, PhasePatchPreHook,
+    RecordingPostHook, RecordingPreHook,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -513,6 +515,29 @@ async fn run_prompt_recovers_when_live_stream_lags_past_terminal_event() {
     assert_eq!(result.thread_id, "thr_lagged");
     assert_eq!(result.turn_id, "turn_lagged");
     assert_eq!(result.assistant_text, "ok-from-thread-read");
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_prompt_lagged_thread_read_respects_absolute_deadline() {
+    let runtime = spawn_run_prompt_lagged_completion_slow_thread_read_runtime().await;
+    let timeout_value = Duration::from_millis(120);
+
+    let started = Instant::now();
+    let err = runtime
+        .run_prompt(
+            PromptRunParams::new("/tmp", "lagged completion probe").with_timeout(timeout_value),
+        )
+        .await
+        .expect_err("run prompt must timeout when lagged fallback read exceeds deadline");
+
+    assert!(matches!(err, PromptRunError::Timeout(d) if d == timeout_value));
+    assert!(
+        started.elapsed() < Duration::from_millis(350),
+        "run_prompt exceeded expected absolute timeout window: {:?}",
+        started.elapsed()
+    );
 
     runtime.shutdown().await.expect("shutdown");
 }

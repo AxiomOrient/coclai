@@ -1,15 +1,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::plugin::PluginContractVersion;
 use crate::runtime::approvals::ServerRequest;
 use crate::runtime::core::Runtime;
 use crate::runtime::events::Envelope;
-use crate::runtime::rpc_contract::methods as events;
 use tokio::sync::{broadcast, RwLock};
 
 mod adapter;
 mod handlers;
+mod service;
 mod state;
 mod wire;
 
@@ -66,44 +65,11 @@ impl WebAdapter {
         adapter: Arc<dyn WebPluginAdapter>,
         config: WebAdapterConfig,
     ) -> Result<Self, WebError> {
-        validate_web_adapter_config(&config)?;
-        ensure_adapter_contract_compatible(adapter.as_ref())?;
-
-        let WebRuntimeStreams {
-            mut request_rx,
-            mut live_rx,
-        } = adapter.take_streams().await?;
-        let adapter_for_events = Arc::clone(&adapter);
-        let adapter_for_approvals = Arc::clone(&adapter);
-
+        let streams = service::prepare_spawn(&adapter, &config).await?;
         let state = Arc::new(RwLock::new(state::WebState::default()));
-        let state_for_events = Arc::clone(&state);
-        let state_for_approvals = Arc::clone(&state);
-
-        let events_task = tokio::spawn(async move {
-            loop {
-                match live_rx.recv().await {
-                    Ok(envelope) => {
-                        handle_live_event(&state_for_events, &adapter_for_events, envelope).await;
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-
-        let approvals_task = tokio::spawn(async move {
-            while let Some(request) = request_rx.recv().await {
-                handlers::prune_stale_approval_index(&state_for_approvals, &adapter_for_approvals)
-                    .await;
-                handlers::route_server_request(&state_for_approvals, request).await;
-            }
-        });
-
-        let background_tasks = Arc::new(BackgroundTasks::new(vec![
-            events_task.abort_handle(),
-            approvals_task.abort_handle(),
-        ]));
+        let handles =
+            service::spawn_routing_tasks(Arc::clone(&adapter), Arc::clone(&state), streams);
+        let background_tasks = Arc::new(BackgroundTasks::new(handles));
 
         Ok(Self {
             adapter,
@@ -171,6 +137,22 @@ impl WebAdapter {
         )
         .await
     }
+
+    #[cfg(test)]
+    pub(crate) async fn debug_server_request_route_miss_counts(&self) -> (u64, u64, u64) {
+        let guard = self.state.read().await;
+        let metrics = guard.server_request_route_miss;
+        (
+            metrics.missing_thread_id,
+            metrics.missing_session_mapping,
+            metrics.missing_approval_topic,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn debug_remove_approval_topic(&self, session_id: &str) {
+        self.state.write().await.approval_topics.remove(session_id);
+    }
 }
 
 pub fn new_session_id() -> String {
@@ -183,58 +165,10 @@ pub fn serialize_sse_envelope(envelope: &Envelope) -> Result<String, WebError> {
 
 impl Drop for WebAdapter {
     fn drop(&mut self) {
-        // `abort_all` is internally idempotent; no extra refcount race checks needed here.
-        self.background_tasks.abort_all();
-    }
-}
-
-fn ensure_adapter_contract_compatible(adapter: &dyn WebPluginAdapter) -> Result<(), WebError> {
-    let expected = PluginContractVersion::CURRENT;
-    let actual = adapter.plugin_contract_version();
-    if expected.is_compatible_with(actual) {
-        Ok(())
-    } else {
-        Err(WebError::IncompatibleContract {
-            expected_major: expected.major,
-            expected_minor: expected.minor,
-            actual_major: actual.major,
-            actual_minor: actual.minor,
-        })
-    }
-}
-
-/// Validate capacity fields before spawning background tasks.
-/// Allocation: none. Complexity: O(1).
-fn validate_web_adapter_config(config: &WebAdapterConfig) -> Result<(), WebError> {
-    ensure_positive_capacity(
-        "session_event_channel_capacity",
-        config.session_event_channel_capacity,
-    )?;
-    ensure_positive_capacity(
-        "session_approval_channel_capacity",
-        config.session_approval_channel_capacity,
-    )?;
-    Ok(())
-}
-
-fn ensure_positive_capacity(name: &str, value: usize) -> Result<(), WebError> {
-    if value > 0 {
-        return Ok(());
-    }
-    Err(WebError::InvalidConfig(format!("{name} must be > 0")))
-}
-
-/// Handle one inbound live envelope: route to sessions, then prune stale approval index if needed.
-/// Side effects: state write + optional adapter call for pruning. Complexity: O(1) amortised.
-async fn handle_live_event(
-    state: &Arc<RwLock<state::WebState>>,
-    adapter: &Arc<dyn WebPluginAdapter>,
-    envelope: crate::runtime::events::Envelope,
-) {
-    let should_prune = envelope.method.as_deref() == Some(events::APPROVAL_ACK);
-    handlers::route_session_event(state, envelope).await;
-    if should_prune {
-        handlers::prune_stale_approval_index(state, adapter).await;
+        // Shared background tasks must stay alive while any clone is still in use.
+        if Arc::strong_count(&self.background_tasks) == 1 {
+            self.background_tasks.abort_all();
+        }
     }
 }
 

@@ -117,6 +117,9 @@ fn workflow_config_new_makes_relative_path_absolute_without_fs_checks() {
 #[test]
 fn workflow_config_new_keeps_absolute_path_stable() {
     let absolute = std::env::temp_dir().join("runtime_abs_path_stable");
-    let cfg = WorkflowConfig::new(absolute.to_string_lossy().to_string());
+    let absolute_utf8 = absolute
+        .to_str()
+        .expect("temp dir path must be utf-8 in this test");
+    let cfg = WorkflowConfig::new(absolute_utf8.to_owned());
     assert_eq!(PathBuf::from(cfg.cwd), absolute);
 }

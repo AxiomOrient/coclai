@@ -114,6 +114,165 @@ for line in sys.stdin:
     path
 }
 
+fn write_archive_singleflight_probe_script(root: &std::path::Path) -> PathBuf {
+    let path = root.join("mock_codex_cli_archive_singleflight.py");
+    let script = r#"#!/usr/bin/env python3
+import json
+import sys
+import time
+
+archive_calls = 0
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    rpc_id = msg.get("id")
+    method = msg.get("method")
+
+    if rpc_id is None:
+        continue
+
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "id": rpc_id,
+            "result": {"ready": True, "userAgent": "Codex Desktop/0.104.0"}
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/start":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": "thr_singleflight"}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/archive":
+        archive_calls += 1
+        if archive_calls == 1:
+            # Keep the first close in-flight long enough to expose duplicate close races.
+            time.sleep(0.2)
+            sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+        else:
+            sys.stdout.write(json.dumps({
+                "id": rpc_id,
+                "error": {"code": -32001, "message": "duplicate archive call"}
+            }) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+    sys.stdout.flush()
+"#;
+    fs::write(&path, script).expect("write singleflight probe script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("set script executable");
+    }
+    path
+}
+
+fn write_resume_sensitive_cli_script(
+    root: &std::path::Path,
+    allowed_resume_calls: usize,
+) -> PathBuf {
+    let path = root.join("mock_codex_cli_resume_sensitive.py");
+    let script = r#"#!/usr/bin/env python3
+import json
+import sys
+
+allowed_resume_calls = __ALLOWED_RESUME_CALLS__
+resume_calls = 0
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    rpc_id = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {}
+
+    if rpc_id is None:
+        continue
+
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "id": rpc_id,
+            "result": {"ready": True, "userAgent": "Codex Desktop/0.104.0"}
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/start":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": "thr_resume_sensitive"}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/resume":
+        resume_calls += 1
+        if resume_calls > allowed_resume_calls:
+            sys.stdout.write(json.dumps({
+                "id": rpc_id,
+                "error": {"code": -32002, "message": f"unexpected thread/resume call #{resume_calls}"}
+            }) + "\n")
+        else:
+            thread_id = params.get("threadId") or "thr_resume_sensitive"
+            sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": thread_id}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "turn/start":
+        thread_id = params.get("threadId") or "thr_resume_sensitive"
+        turn_id = "turn_resume_sensitive"
+        input_items = params.get("input") or []
+        text = "ok"
+        if len(input_items) > 0 and isinstance(input_items[0], dict):
+            text = input_items[0].get("text") or "ok"
+
+        sys.stdout.write(json.dumps({"method":"turn/started","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"item/started","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_1","itemType":"agentMessage"}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_1","delta":text}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"turn/completed","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"turn": {"id": turn_id}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/archive":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+    sys.stdout.flush()
+"#
+    .replace(
+        "__ALLOWED_RESUME_CALLS__",
+        &allowed_resume_calls.to_string(),
+    );
+
+    fs::write(&path, script).expect("write resume-sensitive cli");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("set script executable");
+    }
+    path
+}
+
 fn temp_cwd(temp: &TempDir) -> String {
     temp.root.to_string_lossy().to_string()
 }
@@ -122,6 +281,27 @@ async fn connect_mock_client(prefix: &str, config: ClientConfig) -> (TempDir, su
     let temp = TempDir::new(prefix);
     let cli = write_mock_cli_script(&temp.root);
     let client = super::Client::connect(config.with_cli_bin(cli))
+        .await
+        .expect("client connect");
+    (temp, client)
+}
+
+async fn connect_archive_singleflight_probe_client(prefix: &str) -> (TempDir, super::Client) {
+    let temp = TempDir::new(prefix);
+    let cli = write_archive_singleflight_probe_script(&temp.root);
+    let client = super::Client::connect(ClientConfig::new().with_cli_bin(cli))
+        .await
+        .expect("client connect");
+    (temp, client)
+}
+
+async fn connect_resume_sensitive_client(
+    prefix: &str,
+    allowed_resume_calls: usize,
+) -> (TempDir, super::Client) {
+    let temp = TempDir::new(prefix);
+    let cli = write_resume_sensitive_cli_script(&temp.root, allowed_resume_calls);
+    let client = super::Client::connect(ClientConfig::new().with_cli_bin(cli))
         .await
         .expect("client connect");
     (temp, client)
@@ -436,6 +616,82 @@ async fn session_close_keeps_local_handle_closed_when_archive_rpc_fails() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn session_close_is_single_flight_under_concurrency() {
+    let (temp, client) =
+        connect_archive_singleflight_probe_client("runtime_client_session_close_singleflight")
+            .await;
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start session");
+
+    let close_a = session.clone();
+    let close_b = session.clone();
+    let (first, second) = tokio::join!(close_a.close(), close_b.close());
+    first.expect("first close must succeed");
+    second.expect("second close must share first close result");
+
+    session
+        .close()
+        .await
+        .expect("cached close result must remain successful");
+    assert!(session.is_closed());
+
+    let ask_err = session
+        .ask("must fail")
+        .await
+        .expect_err("session is closed");
+    assert!(matches!(
+        ask_err,
+        crate::runtime::api::PromptRunError::Rpc(crate::runtime::errors::RpcError::InvalidRequest(
+            _
+        ))
+    ));
+
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_ask_uses_loaded_thread_without_thread_resume() {
+    let (temp, client) =
+        connect_resume_sensitive_client("runtime_client_session_loaded_thread", 0).await;
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start session");
+
+    let out = session.ask("loaded-thread").await.expect("ask");
+    assert_eq!(out.assistant_text, "loaded-thread");
+
+    session.close().await.expect("close session");
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_session_ask_does_not_issue_second_thread_resume() {
+    let (temp, client) =
+        connect_resume_sensitive_client("runtime_client_resumed_session_loaded_thread", 1).await;
+
+    let initial = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start initial session");
+    let thread_id = initial.thread_id.clone();
+
+    let resumed = client
+        .resume_session(&thread_id, SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("resume session");
+    let out = resumed.ask("after-resume").await.expect("ask after resume");
+    assert_eq!(out.assistant_text, "after-resume");
+
+    resumed.close().await.expect("close resumed session");
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn client_config_hooks_execute_on_run_path() {
     let phases = Arc::new(Mutex::new(Vec::<HookPhase>::new()));
 
@@ -615,68 +871,6 @@ async fn session_hooks_do_not_leak_to_other_sessions() {
         baseline, after,
         "session hooks leaked into later session operations",
     );
-
-    client.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn deprecated_client_session_aliases_remain_operational() {
-    let (temp, client) =
-        connect_mock_client("runtime_client_deprecated_aliases", ClientConfig::new()).await;
-
-    #[allow(deprecated)]
-    let session = client.setup(temp_cwd(&temp)).await.expect("setup");
-
-    #[allow(deprecated)]
-    let continued = client
-        .continue_session(&session.thread_id, temp_cwd(&temp), "legacy-continue")
-        .await
-        .expect("continue_session");
-    assert_eq!(continued.assistant_text, "legacy-continue");
-
-    #[allow(deprecated)]
-    let continued_with = client
-        .continue_session_with(
-            &session.thread_id,
-            crate::runtime::api::PromptRunParams::new(temp_cwd(&temp), "legacy-with"),
-        )
-        .await
-        .expect("continue_session_with");
-    assert_eq!(continued_with.assistant_text, "legacy-with");
-
-    #[allow(deprecated)]
-    let continued_with_profile = client
-        .continue_session_with_profile(
-            &session.thread_id,
-            temp_cwd(&temp),
-            "legacy-profile",
-            RunProfile::new().with_effort(ReasoningEffort::Low),
-        )
-        .await
-        .expect("continue_session_with_profile");
-    assert_eq!(continued_with_profile.assistant_text, "legacy-profile");
-
-    #[allow(deprecated)]
-    client
-        .interrupt_session_turn(&session.thread_id, &continued.turn_id)
-        .await
-        .expect("interrupt_session_turn");
-
-    #[allow(deprecated)]
-    client
-        .close_session(&session.thread_id)
-        .await
-        .expect("close_session");
-
-    #[allow(deprecated)]
-    let profiled_session = client
-        .setup_with_profile(temp_cwd(&temp), RunProfile::new().with_model("gpt-5-codex"))
-        .await
-        .expect("setup_with_profile");
-    profiled_session
-        .close()
-        .await
-        .expect("close profiled session");
 
     client.shutdown().await.expect("shutdown");
 }

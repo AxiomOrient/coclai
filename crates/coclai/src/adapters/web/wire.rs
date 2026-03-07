@@ -1,4 +1,5 @@
 use crate::runtime::events::{Direction, Envelope, MsgKind};
+use crate::runtime::id::{extract_thread_id, parse_result_turn_id};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -108,52 +109,11 @@ pub(super) fn serialize_sse_envelope(envelope: &Envelope) -> Result<String, WebE
 /// Adapter-local parser for server-request thread id.
 /// Accepts either `threadId` or nested `thread.id` shapes.
 pub(super) fn extract_thread_id_from_server_request_params(params: &Value) -> Option<String> {
-    parse_str_field(params, "threadId")
-        .or_else(|| parse_nested_id_field(params, "thread"))
-        .map(ToOwned::to_owned)
+    extract_thread_id(params).map(ToOwned::to_owned)
 }
 
 /// Adapter-local parser for turn/start result turn id.
-/// Accepts `{turn:{id}}`, `turnId`, top-level `id`, or raw string payload.
+/// Accepts canonical `{turn:{id}}` or `turnId` only.
 pub(super) fn parse_turn_id_from_turn_result(value: &Value) -> Option<String> {
-    value
-        .pointer("/turn/id")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            value
-                .get("turnId")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .or_else(|| {
-            value
-                .get("id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .or_else(|| value.as_str().map(ToOwned::to_owned))
-}
-
-fn parse_str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str).or_else(|| {
-        value
-            .get("params")
-            .and_then(|v| v.get(key))
-            .and_then(Value::as_str)
-    })
-}
-
-fn parse_nested_id_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value
-        .get(key)
-        .and_then(|v| v.get("id"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            value
-                .get("params")
-                .and_then(|v| v.get(key))
-                .and_then(|v| v.get("id"))
-                .and_then(Value::as_str)
-        })
+    parse_result_turn_id(value).map(ToOwned::to_owned)
 }

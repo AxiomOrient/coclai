@@ -5,6 +5,7 @@ use crate::runtime::core::Runtime;
 
 mod adapter;
 mod execution;
+mod lock_policy;
 mod models;
 mod store;
 
@@ -22,6 +23,8 @@ pub use models::{
 
 #[cfg(test)]
 pub(crate) use execution::collect_turn_output_from_live_with_limits;
+#[cfg(test)]
+pub(crate) use execution::debug_with_forced_turn_start_params_serialization_failure;
 #[cfg(test)]
 pub(crate) use execution::{build_turn_prompt, build_turn_start_params};
 #[cfg(test)]

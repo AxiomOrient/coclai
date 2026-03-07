@@ -118,6 +118,24 @@ async fn thread_start_rejects_privileged_sandbox_without_scope() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn thread_start_rejects_malformed_raw_sandbox_policy() {
+    let runtime = spawn_mock_runtime().await;
+    let err = runtime
+        .thread_start(ThreadStartParams {
+            cwd: Some("/tmp".to_owned()),
+            approval_policy: Some(ApprovalPolicy::OnRequest),
+            sandbox_policy: Some(SandboxPolicy::Raw(json!("readOnly"))),
+            privileged_escalation_approved: true,
+            ..ThreadStartParams::default()
+        })
+        .await
+        .expect_err("must reject malformed raw sandbox policy");
+    assert_invalid_request(err);
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn turn_start_rejects_privileged_sandbox_without_explicit_opt_in() {
     let runtime = spawn_mock_runtime().await;
     let thread = runtime

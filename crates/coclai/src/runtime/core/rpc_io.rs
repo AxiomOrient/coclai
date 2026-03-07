@@ -8,6 +8,7 @@ use tokio::time::timeout;
 
 use crate::runtime::errors::{RpcError, RuntimeError};
 
+use super::io_policy::{build_rpc_request, project_pending_rpc_outcome, PendingRpcOutcome};
 use super::{state_projection::state_clear_pending_server_requests, RuntimeInner};
 
 pub(super) async fn call_raw_inner(
@@ -26,25 +27,24 @@ pub(super) async fn call_raw_inner(
     let (pending_tx, pending_rx) = oneshot::channel();
     inner.io.pending.lock().await.insert(rpc_id, pending_tx);
     inner.metrics.inc_pending_rpc();
+    let mut pending_guard = PendingRpcGuard::new(inner, rpc_id);
 
-    let request = json!({
-        "id": rpc_id,
-        "method": method,
-        "params": params
-    });
+    let request = build_rpc_request(rpc_id, method, params);
     if outbound_tx.send(request).await.is_err() {
         clear_pending_rpc(inner, rpc_id).await;
+        pending_guard.disarm();
         return Err(RpcError::TransportClosed);
     }
 
-    match timeout(timeout_duration, pending_rx).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err(RpcError::TransportClosed),
-        Err(_) => {
+    let result = match project_pending_rpc_outcome(timeout(timeout_duration, pending_rx).await) {
+        PendingRpcOutcome::Ready(result) => result,
+        PendingRpcOutcome::Timeout => {
             clear_pending_rpc(inner, rpc_id).await;
             Err(RpcError::Timeout)
         }
-    }
+    };
+    pending_guard.disarm();
+    result
 }
 
 pub(super) async fn notify_raw_inner(
@@ -84,5 +84,40 @@ pub(super) async fn resolve_transport_closed_pending(inner: &Arc<RuntimeInner>) 
 async fn clear_pending_rpc(inner: &Arc<RuntimeInner>, rpc_id: u64) {
     if inner.io.pending.lock().await.remove(&rpc_id).is_some() {
         inner.metrics.dec_pending_rpc();
+    }
+}
+
+struct PendingRpcGuard {
+    inner: Arc<RuntimeInner>,
+    rpc_id: u64,
+    armed: bool,
+}
+
+impl PendingRpcGuard {
+    fn new(inner: &Arc<RuntimeInner>, rpc_id: u64) -> Self {
+        Self {
+            inner: inner.clone(),
+            rpc_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingRpcGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let inner = self.inner.clone();
+        let rpc_id = self.rpc_id;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                clear_pending_rpc(&inner, rpc_id).await;
+            });
+        }
     }
 }

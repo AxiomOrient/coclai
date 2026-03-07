@@ -281,5 +281,5 @@ fn maps_thread_start_params_to_wire_shape() {
     assert_eq!(wire["model"], "gpt-5");
     assert_eq!(wire["cwd"], "/work");
     assert_eq!(wire["approvalPolicy"], "on-request");
-    assert_eq!(wire["sandbox"], "read-only");
+    assert_eq!(wire["sandboxPolicy"]["type"], "readOnly");
 }

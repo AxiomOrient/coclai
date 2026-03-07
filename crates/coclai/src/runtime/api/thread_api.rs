@@ -7,17 +7,89 @@ use crate::runtime::core::Runtime;
 use crate::runtime::errors::RpcError;
 use crate::runtime::hooks::RuntimeHookConfig;
 use crate::runtime::rpc_contract::{methods, RpcValidationMode};
-use crate::runtime::turn_output::parse_thread_id;
+use crate::runtime::turn_output::{parse_thread_id, parse_turn_id};
 
 use super::flow::{
     apply_pre_hook_actions_to_session, result_status, HookContextInput, HookExecutionState,
     SessionMutationState,
 };
-use super::ops::{deserialize_result, serialize_params};
-use super::wire::thread_overrides_to_wire;
+use super::wire::{
+    deserialize_result, input_item_to_wire, serialize_params, thread_overrides_to_wire,
+    turn_start_params_to_wire, validate_turn_start_security,
+};
 use super::*;
 
+impl ThreadHandle {
+    pub fn runtime(&self) -> &crate::runtime::core::Runtime {
+        &self.runtime
+    }
+
+    pub async fn turn_start(&self, p: TurnStartParams) -> Result<TurnHandle, RpcError> {
+        ensure_turn_input_not_empty(&p.input)?;
+        validate_turn_start_security(&p)?;
+
+        let response = self
+            .runtime
+            .call_validated(
+                methods::TURN_START,
+                turn_start_params_to_wire(&self.thread_id, &p),
+            )
+            .await?;
+
+        let turn_id = parse_turn_id(&response).ok_or_else(|| {
+            RpcError::InvalidRequest(format!("turn/start missing turn id in result: {response}"))
+        })?;
+
+        Ok(TurnHandle {
+            turn_id,
+            thread_id: self.thread_id.clone(),
+        })
+    }
+
+    /// Start a follow-up turn anchored to an expected previous turn id.
+    /// Allocation: JSON params + input item wire objects.
+    /// Complexity: O(n), n = input item count.
+    pub async fn turn_steer(
+        &self,
+        expected_turn_id: &str,
+        input: Vec<InputItem>,
+    ) -> Result<super::TurnId, RpcError> {
+        ensure_turn_input_not_empty(&input)?;
+
+        let mut params = Map::<String, Value>::new();
+        params.insert("threadId".to_owned(), Value::String(self.thread_id.clone()));
+        params.insert(
+            "expectedTurnId".to_owned(),
+            Value::String(expected_turn_id.to_owned()),
+        );
+        params.insert(
+            "input".to_owned(),
+            Value::Array(input.iter().map(input_item_to_wire).collect()),
+        );
+        let response = self
+            .runtime
+            .call_validated(methods::TURN_START, Value::Object(params))
+            .await?;
+        parse_turn_id(&response).ok_or_else(|| {
+            RpcError::InvalidRequest(format!(
+                "turn/start(steer) missing turn id in result: {response}"
+            ))
+        })
+    }
+
+    pub async fn turn_interrupt(&self, turn_id: &str) -> Result<(), RpcError> {
+        self.runtime.turn_interrupt(&self.thread_id, turn_id).await
+    }
+}
+
 impl Runtime {
+    pub(crate) fn loaded_thread_handle(&self, thread_id: &str) -> ThreadHandle {
+        ThreadHandle {
+            thread_id: thread_id.to_owned(),
+            runtime: self.clone(),
+        }
+    }
+
     pub async fn thread_start(&self, p: ThreadStartParams) -> Result<ThreadHandle, RpcError> {
         self.thread_start_with_hooks(p, None).await
     }
@@ -299,4 +371,13 @@ fn interrupt_params(thread_id: &str, turn_id: &str) -> Value {
     params.insert("threadId".to_owned(), Value::String(thread_id.to_owned()));
     params.insert("turnId".to_owned(), Value::String(turn_id.to_owned()));
     Value::Object(params)
+}
+
+fn ensure_turn_input_not_empty(input: &[InputItem]) -> Result<(), RpcError> {
+    if input.is_empty() {
+        return Err(RpcError::InvalidRequest(
+            "turn input must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
 }

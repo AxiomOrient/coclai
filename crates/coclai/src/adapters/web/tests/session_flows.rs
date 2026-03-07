@@ -190,6 +190,68 @@ async fn create_session_rejects_resume_thread_id_mismatch() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn create_session_rejects_thread_reuse_with_different_artifact() {
+    let (_live_tx, live_rx) = broadcast::channel::<Envelope>(8);
+    let (_request_tx, request_rx) = tokio::sync::mpsc::channel::<ServerRequest>(8);
+    let fake_state = Arc::new(Mutex::new(FakeWebAdapterState {
+        start_thread_id: "thr_artifact_scope".to_owned(),
+        ..FakeWebAdapterState::default()
+    }));
+    let adapter: Arc<dyn WebPluginAdapter> = Arc::new(FakeWebAdapter {
+        state: Arc::clone(&fake_state),
+        streams: Arc::new(Mutex::new(Some(WebRuntimeStreams {
+            request_rx,
+            live_rx,
+        }))),
+    });
+    let web = WebAdapter::spawn_with_adapter(adapter, WebAdapterConfig::default())
+        .await
+        .expect("spawn with fake adapter");
+
+    let session = web
+        .create_session(
+            "tenant_a",
+            CreateSessionRequest {
+                artifact_id: "doc:artifact-a".to_owned(),
+                model: None,
+                thread_id: None,
+            },
+        )
+        .await
+        .expect("create seed session");
+    assert_eq!(session.thread_id, "thr_artifact_scope");
+
+    let err = web
+        .create_session(
+            "tenant_a",
+            CreateSessionRequest {
+                artifact_id: "doc:artifact-b".to_owned(),
+                model: None,
+                thread_id: Some("thr_artifact_scope".to_owned()),
+            },
+        )
+        .await
+        .expect_err("different artifact for same thread must be rejected");
+    assert!(matches!(
+        err,
+        WebError::SessionThreadConflict {
+            thread_id,
+            existing_artifact_id,
+            requested_artifact_id
+        } if thread_id == "thr_artifact_scope"
+            && existing_artifact_id == "doc:artifact-a"
+            && requested_artifact_id == "doc:artifact-b"
+    ));
+
+    let state = fake_state.lock().expect("fake adapter state lock");
+    assert_eq!(
+        state.resume_calls.len(),
+        0,
+        "invariant rejection must happen before thread/resume"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn close_session_removes_session_indexes() {
     let runtime = spawn_mock_runtime().await;
     let adapter = WebAdapter::spawn(runtime.clone(), WebAdapterConfig::default())
@@ -337,4 +399,91 @@ async fn close_session_can_retry_after_archive_failure() {
         .await
         .expect_err("session must be removed after successful retry");
     assert_eq!(err, WebError::InvalidSession);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn close_session_cancellation_rolls_back_lifecycle() {
+    let archive_gate = Arc::new(tokio::sync::Notify::new());
+    let (_live_tx, live_rx) = broadcast::channel::<Envelope>(8);
+    let (_request_tx, request_rx) = tokio::sync::mpsc::channel::<ServerRequest>(8);
+    let fake_state = Arc::new(Mutex::new(FakeWebAdapterState {
+        start_thread_id: "thr_close_cancel".to_owned(),
+        archive_block_on: Some(Arc::clone(&archive_gate)),
+        ..FakeWebAdapterState::default()
+    }));
+    let adapter: Arc<dyn WebPluginAdapter> = Arc::new(FakeWebAdapter {
+        state: Arc::clone(&fake_state),
+        streams: Arc::new(Mutex::new(Some(WebRuntimeStreams {
+            request_rx,
+            live_rx,
+        }))),
+    });
+    let web = WebAdapter::spawn_with_adapter(adapter, WebAdapterConfig::default())
+        .await
+        .expect("spawn with fake adapter");
+
+    let session = web
+        .create_session(
+            "tenant_a",
+            CreateSessionRequest {
+                artifact_id: "doc:close-cancel".to_owned(),
+                model: None,
+                thread_id: None,
+            },
+        )
+        .await
+        .expect("create session");
+
+    let close_web = web.clone();
+    let close_session_id = session.session_id.clone();
+    let close_task =
+        tokio::spawn(async move { close_web.close_session("tenant_a", &close_session_id).await });
+
+    let closing_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let create_result = web
+            .create_turn(
+                "tenant_a",
+                &session.session_id,
+                CreateTurnRequest {
+                    task: turn_task("observe-closing"),
+                },
+            )
+            .await;
+        if matches!(create_result, Err(WebError::SessionClosing)) {
+            break;
+        }
+        if Instant::now() >= closing_deadline {
+            panic!("session was not observed in closing lifecycle before cancellation");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    close_task.abort();
+    let _ = close_task.await;
+
+    let rollback_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let create_result = web
+            .create_turn(
+                "tenant_a",
+                &session.session_id,
+                CreateTurnRequest {
+                    task: turn_task("after-cancel"),
+                },
+            )
+            .await;
+        match create_result {
+            Err(WebError::SessionClosing) if Instant::now() < rollback_deadline => {
+                sleep(Duration::from_millis(10)).await;
+            }
+            Err(WebError::SessionClosing) => {
+                panic!("session remained closing after cancellation rollback window");
+            }
+            Err(other) => {
+                panic!("unexpected error after cancellation rollback: {other:?}");
+            }
+            Ok(_) => break,
+        }
+    }
 }

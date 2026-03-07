@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::runtime::events::Envelope;
+use crate::runtime::id::{parse_result_thread_id, parse_result_turn_id};
 use crate::runtime::rpc_contract::methods as events;
 
 use std::sync::Arc;
@@ -124,33 +125,13 @@ impl TurnStreamCollector {
 /// Parse thread id from common JSON-RPC result shapes.
 /// Allocation: one String on match. Complexity: O(1).
 pub fn parse_thread_id(value: &Value) -> Option<String> {
-    parse_common_id(value, "/thread/id", "threadId")
+    parse_result_thread_id(value).map(ToOwned::to_owned)
 }
 
 /// Parse turn id from common JSON-RPC result shapes.
 /// Allocation: one String on match. Complexity: O(1).
 pub fn parse_turn_id(value: &Value) -> Option<String> {
-    parse_common_id(value, "/turn/id", "turnId")
-}
-
-fn parse_common_id(value: &Value, nested_pointer: &str, camel_id_field: &str) -> Option<String> {
-    value
-        .pointer(nested_pointer)
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            value
-                .get(camel_id_field)
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .or_else(|| {
-            value
-                .get("id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .or_else(|| value.as_str().map(ToOwned::to_owned))
+    parse_result_turn_id(value).map(ToOwned::to_owned)
 }
 
 fn track_assistant_item(assistant_item_ids: &mut HashSet<Arc<str>>, envelope: &Envelope) {
@@ -374,6 +355,14 @@ mod tests {
         let v = json!({"thread":{"id":"thr_1"},"turn":{"id":"turn_1"}});
         assert_eq!(parse_thread_id(&v).as_deref(), Some("thr_1"));
         assert_eq!(parse_turn_id(&v).as_deref(), Some("turn_1"));
+    }
+
+    #[test]
+    fn parse_ids_reject_loose_id_fallback_and_empty_values() {
+        assert_eq!(parse_thread_id(&json!({"id":"thr_loose"})), None);
+        assert_eq!(parse_turn_id(&json!("turn_loose")), None);
+        assert_eq!(parse_thread_id(&json!({"threadId":""})), None);
+        assert_eq!(parse_turn_id(&json!({"turn":{"id":"  "}})), None);
     }
 
     #[test]

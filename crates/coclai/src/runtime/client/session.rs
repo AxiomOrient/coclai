@@ -38,12 +38,12 @@ impl Session {
     }
 
     /// Continue this session with one prompt.
-    /// Side effects: sends thread/resume + turn/start RPC calls to app-server.
+    /// Side effects: sends turn/start RPC calls on one already-loaded thread.
     /// Allocation: PromptRunParams clone payloads (cwd/model/sandbox/attachments). Complexity: O(n), n = attachment count + prompt length.
     pub async fn ask(&self, prompt: impl Into<String>) -> Result<PromptRunResult, PromptRunError> {
         ensure_session_open_for_prompt(self.is_closed())?;
         self.runtime
-            .run_prompt_in_thread_with_hooks(
+            .run_prompt_on_loaded_thread_with_hooks(
                 &self.thread_id,
                 session_prompt_params(&self.config, prompt),
                 Some(&self.config.hooks),
@@ -52,7 +52,7 @@ impl Session {
     }
 
     /// Continue this session with one prompt while overriding selected turn options.
-    /// Side effects: sends thread/resume + turn/start RPC calls to app-server.
+    /// Side effects: sends turn/start RPC calls on one already-loaded thread.
     /// Allocation: depends on caller-provided params. Complexity: O(1) wrapper.
     pub async fn ask_with(
         &self,
@@ -60,12 +60,16 @@ impl Session {
     ) -> Result<PromptRunResult, PromptRunError> {
         ensure_session_open_for_prompt(self.is_closed())?;
         self.runtime
-            .run_prompt_in_thread_with_hooks(&self.thread_id, params, Some(&self.config.hooks))
+            .run_prompt_on_loaded_thread_with_hooks(
+                &self.thread_id,
+                params,
+                Some(&self.config.hooks),
+            )
             .await
     }
 
     /// Continue this session with one prompt using one explicit profile override.
-    /// Side effects: sends thread/resume + turn/start RPC calls to app-server.
+    /// Side effects: sends turn/start RPC calls on one already-loaded thread.
     /// Allocation: moves profile-owned Strings/vectors + one prompt String. Complexity: O(n), n = attachment count + field sizes.
     pub async fn ask_with_profile(
         &self,
@@ -77,7 +81,7 @@ impl Session {
             profile_to_prompt_params_with_hooks(self.config.cwd.clone(), prompt, profile);
         let merged_hooks = merge_hook_configs(&self.config.hooks, &profile_hooks);
         self.runtime
-            .run_prompt_in_thread_with_hooks(&self.thread_id, params, Some(&merged_hooks))
+            .run_prompt_on_loaded_thread_with_hooks(&self.thread_id, params, Some(&merged_hooks))
             .await
     }
 
@@ -99,16 +103,13 @@ impl Session {
     /// Side effects: sends thread/archive RPC call to app-server.
     /// Allocation: one small JSON payload in runtime layer. Complexity: O(1).
     pub async fn close(&self) -> Result<(), RpcError> {
-        {
-            let guard = self.close_result.lock().await;
-            if let Some(result) = guard.as_ref() {
-                return result.clone();
-            }
+        let mut guard = self.close_result.lock().await;
+        if let Some(result) = guard.as_ref() {
+            return result.clone();
         }
 
         self.closed.store(true, Ordering::Release);
         let result = self.runtime.thread_archive(&self.thread_id).await;
-        let mut guard = self.close_result.lock().await;
         *guard = Some(result.clone());
         result
     }

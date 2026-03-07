@@ -6,7 +6,6 @@ use crate::runtime::turn_output::parse_thread_id;
 mod attachment_validation;
 mod flow;
 mod models;
-mod ops;
 mod prompt_run;
 mod thread_api;
 mod turn_error;
@@ -35,6 +34,9 @@ mod types;
 
 pub use models::{
     PromptRunError, PromptRunParams, PromptRunResult, PromptTurnFailure, PromptTurnTerminalState,
+};
+pub(crate) use types::{
+    sandbox_policy_to_wire_value, summarize_sandbox_policy, summarize_sandbox_policy_wire_value,
 };
 pub use types::{
     ApprovalPolicy, ByteRange, ExternalNetworkAccess, InputItem, PromptAttachment, ReasoningEffort,

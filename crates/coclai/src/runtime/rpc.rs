@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::runtime::errors::{RpcError, RpcErrorObject};
 use crate::runtime::events::{JsonRpcId, MsgKind};
+use crate::runtime::id::{extract_item_id, extract_thread_id, extract_turn_id};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtractedIds {
@@ -76,13 +77,13 @@ pub fn extract_message_metadata(json: &Value) -> MsgMetadata {
     let mut item_id = None;
     for root in roots.into_iter().flatten() {
         if thread_id.is_none() {
-            thread_id = get_thread_id(root).map(Arc::from);
+            thread_id = extract_thread_id(root).map(Arc::from);
         }
         if turn_id.is_none() {
-            turn_id = get_turn_id(root).map(Arc::from);
+            turn_id = extract_turn_id(root).map(Arc::from);
         }
         if item_id.is_none() {
-            item_id = get_item_id(root).map(Arc::from);
+            item_id = extract_item_id(root).map(Arc::from);
         }
         if thread_id.is_some() && turn_id.is_some() && item_id.is_some() {
             break;
@@ -122,39 +123,6 @@ pub fn map_rpc_error(json_error: &Value) -> RpcError {
         }),
         None => RpcError::InvalidRequest("invalid rpc error payload".to_owned()),
     }
-}
-
-fn get_str_field<'a>(root: &'a Value, key: &str) -> Option<&'a str> {
-    if let Some(s) = root.get(key).and_then(Value::as_str) {
-        return Some(s);
-    }
-    root.get("params")
-        .and_then(|v| v.get(key))
-        .and_then(Value::as_str)
-}
-
-fn get_nested_id_field<'a>(root: &'a Value, key: &str) -> Option<&'a str> {
-    root.get(key)
-        .and_then(|v| v.get("id"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            root.get("params")
-                .and_then(|v| v.get(key))
-                .and_then(|v| v.get("id"))
-                .and_then(Value::as_str)
-        })
-}
-
-fn get_thread_id(root: &Value) -> Option<&str> {
-    get_str_field(root, "threadId").or_else(|| get_nested_id_field(root, "thread"))
-}
-
-fn get_turn_id(root: &Value) -> Option<&str> {
-    get_str_field(root, "turnId").or_else(|| get_nested_id_field(root, "turn"))
-}
-
-fn get_item_id(root: &Value) -> Option<&str> {
-    get_str_field(root, "itemId").or_else(|| get_nested_id_field(root, "item"))
 }
 
 fn parse_response_rpc_id_value(id_value: Option<&Value>) -> Option<u64> {
@@ -262,6 +230,21 @@ mod tests {
         assert_eq!(ids.thread_id, None);
         assert_eq!(ids.turn_id, None);
         assert_eq!(ids.item_id, None);
+    }
+
+    #[test]
+    fn extract_ids_rejects_non_canonical_id_values() {
+        let v = json!({
+            "params": {
+                "threadId": " thr_space ",
+                "turn": {"id": ""},
+                "itemId": "item_ok"
+            }
+        });
+        let ids = extract_ids(&v);
+        assert_eq!(ids.thread_id, None);
+        assert_eq!(ids.turn_id, None);
+        assert_eq!(ids.item_id.as_deref(), Some("item_ok"));
     }
 
     #[test]

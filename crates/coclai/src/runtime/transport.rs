@@ -2,16 +2,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 
+use crate::runtime::core::io_policy::{
+    normalize_text_tail, trim_ascii_line_endings, trim_tail_bytes, validate_positive_capacity,
+};
 use crate::runtime::errors::RuntimeError;
+
+const DEFAULT_MAX_INBOUND_FRAME_BYTES: usize = 1024 * 1024;
+const DEFAULT_STDERR_TAIL_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StdioProcessSpec {
@@ -36,6 +42,8 @@ impl StdioProcessSpec {
 pub struct StdioTransportConfig {
     pub read_channel_capacity: usize,
     pub write_channel_capacity: usize,
+    pub max_inbound_frame_bytes: usize,
+    pub stderr_tail_max_bytes: usize,
 }
 
 impl Default for StdioTransportConfig {
@@ -43,24 +51,61 @@ impl Default for StdioTransportConfig {
         Self {
             read_channel_capacity: 1024,
             write_channel_capacity: 1024,
+            max_inbound_frame_bytes: DEFAULT_MAX_INBOUND_FRAME_BYTES,
+            stderr_tail_max_bytes: DEFAULT_STDERR_TAIL_MAX_BYTES,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransportJoinResult {
     pub exit_status: ExitStatus,
     pub malformed_line_count: u64,
+    pub stderr_tail: Option<String>,
 }
 
 pub struct StdioTransport {
     write_tx: Option<mpsc::Sender<Value>>,
     read_rx: Option<mpsc::Receiver<Value>>,
     malformed_line_count: Arc<AtomicU64>,
+    stderr_diagnostics: Arc<StderrDiagnostics>,
     reader_task: Option<JoinHandle<std::io::Result<()>>>,
     writer_task: Option<JoinHandle<std::io::Result<()>>>,
+    stderr_task: Option<JoinHandle<std::io::Result<()>>>,
     child: Option<Child>,
     child_exit_status: Option<ExitStatus>,
+}
+
+#[derive(Default)]
+struct StderrDiagnostics {
+    tail: Mutex<Vec<u8>>,
+}
+
+impl StderrDiagnostics {
+    fn append_chunk(&self, chunk: &[u8], max_tail_bytes: usize) {
+        let mut tail = match self.tail.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tail.extend_from_slice(chunk);
+        trim_tail_bytes(&mut tail, max_tail_bytes);
+    }
+
+    fn snapshot(&self) -> Option<String> {
+        let tail = match self.tail.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        normalize_text_tail(&tail)
+    }
+
+    fn has_data(&self) -> bool {
+        let tail = match self.tail.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        !tail.is_empty()
+    }
 }
 
 impl StdioTransport {
@@ -68,23 +113,17 @@ impl StdioTransport {
         spec: StdioProcessSpec,
         config: StdioTransportConfig,
     ) -> Result<Self, RuntimeError> {
-        if config.read_channel_capacity == 0 {
-            return Err(RuntimeError::InvalidConfig(
-                "read_channel_capacity must be > 0".to_owned(),
-            ));
-        }
-        if config.write_channel_capacity == 0 {
-            return Err(RuntimeError::InvalidConfig(
-                "write_channel_capacity must be > 0".to_owned(),
-            ));
-        }
+        validate_positive_capacity("read_channel_capacity", config.read_channel_capacity)?;
+        validate_positive_capacity("write_channel_capacity", config.write_channel_capacity)?;
+        validate_positive_capacity("max_inbound_frame_bytes", config.max_inbound_frame_bytes)?;
+        validate_positive_capacity("stderr_tail_max_bytes", config.stderr_tail_max_bytes)?;
 
         let mut command = Command::new(&spec.program);
         command
             .args(&spec.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
 
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
@@ -104,21 +143,38 @@ impl StdioTransport {
         let stdout = child.stdout.take().ok_or_else(|| {
             RuntimeError::Internal("failed to acquire child stdout pipe".to_owned())
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            RuntimeError::Internal("failed to acquire child stderr pipe".to_owned())
+        })?;
 
         let (write_tx, write_rx) = mpsc::channel(config.write_channel_capacity);
         let (read_tx, read_rx) = mpsc::channel(config.read_channel_capacity);
         let malformed_line_count = Arc::new(AtomicU64::new(0));
         let malformed_line_count_clone = Arc::clone(&malformed_line_count);
+        let stderr_diagnostics = Arc::new(StderrDiagnostics::default());
+        let stderr_diagnostics_clone = Arc::clone(&stderr_diagnostics);
 
-        let reader_task = tokio::spawn(reader_loop(stdout, read_tx, malformed_line_count_clone));
+        let reader_task = tokio::spawn(reader_loop(
+            stdout,
+            read_tx,
+            malformed_line_count_clone,
+            config.max_inbound_frame_bytes,
+        ));
         let writer_task = tokio::spawn(writer_loop(write_rx, stdin));
+        let stderr_task = tokio::spawn(stderr_loop(
+            stderr,
+            stderr_diagnostics_clone,
+            config.stderr_tail_max_bytes,
+        ));
 
         Ok(Self {
             write_tx: Some(write_tx),
             read_rx: Some(read_rx),
             malformed_line_count,
+            stderr_diagnostics,
             reader_task: Some(reader_task),
             writer_task: Some(writer_task),
+            stderr_task: Some(stderr_task),
             child: Some(child),
             child_exit_status: None,
         })
@@ -139,6 +195,12 @@ impl StdioTransport {
 
     pub fn malformed_line_count(&self) -> u64 {
         self.malformed_line_count.load(Ordering::Relaxed)
+    }
+
+    /// Latest child stderr tail snapshot, if any bytes have been observed.
+    /// Allocation: one String clone. Complexity: O(n), n = stored stderr tail bytes.
+    pub fn stderr_tail_snapshot(&self) -> Option<String> {
+        self.stderr_diagnostics.snapshot()
     }
 
     /// Non-blocking child status probe.
@@ -167,13 +229,30 @@ impl StdioTransport {
         drop(self.read_rx.take());
         drop(self.write_tx.take());
 
-        await_io_task(self.writer_task.take(), "writer").await?;
-        await_io_task(self.reader_task.take(), "reader").await?;
+        await_io_task(
+            self.writer_task.take(),
+            "writer",
+            self.stderr_diagnostics.as_ref(),
+        )
+        .await?;
+        await_io_task(
+            self.reader_task.take(),
+            "reader",
+            self.stderr_diagnostics.as_ref(),
+        )
+        .await?;
         let exit_status = wait_child_exit(&mut self).await?;
+        await_io_task(
+            self.stderr_task.take(),
+            "stderr-reader",
+            self.stderr_diagnostics.as_ref(),
+        )
+        .await?;
 
         Ok(TransportJoinResult {
             exit_status,
             malformed_line_count,
+            stderr_tail: self.stderr_diagnostics.snapshot(),
         })
     }
 
@@ -206,18 +285,38 @@ impl StdioTransport {
                 writer_task.await
             }
         }
-        .map_err(|err| RuntimeError::Internal(format!("writer task join failed: {err}")))?;
+        .map_err(|err| {
+            runtime_internal_with_stderr(
+                format!("writer task join failed: {err}"),
+                self.stderr_diagnostics.as_ref(),
+            )
+        })?;
 
         if let Err(err) = writer_result {
-            return Err(RuntimeError::Internal(format!("writer task failed: {err}")));
+            return Err(runtime_internal_with_stderr(
+                format!("writer task failed: {err}"),
+                self.stderr_diagnostics.as_ref(),
+            ));
         }
 
         let exit_status = wait_child_exit_with_grace(&mut self, terminate_grace).await?;
-        await_io_task(self.reader_task.take(), "reader").await?;
+        await_io_task(
+            self.reader_task.take(),
+            "reader",
+            self.stderr_diagnostics.as_ref(),
+        )
+        .await?;
+        await_io_task(
+            self.stderr_task.take(),
+            "stderr-reader",
+            self.stderr_diagnostics.as_ref(),
+        )
+        .await?;
 
         Ok(TransportJoinResult {
             exit_status,
             malformed_line_count,
+            stderr_tail: self.stderr_diagnostics.snapshot(),
         })
     }
 }
@@ -225,22 +324,40 @@ impl StdioTransport {
 async fn await_io_task(
     task: Option<JoinHandle<std::io::Result<()>>>,
     label: &str,
+    stderr_diagnostics: &StderrDiagnostics,
 ) -> Result<(), RuntimeError> {
     let Some(task) = task else {
-        return Err(RuntimeError::Internal(format!(
-            "{label} task missing in transport"
-        )));
+        return Err(runtime_internal_with_stderr(
+            format!("{label} task missing in transport"),
+            stderr_diagnostics,
+        ));
     };
 
     let joined = task.await;
-    let task_result =
-        joined.map_err(|err| RuntimeError::Internal(format!("{label} task join failed: {err}")))?;
+    let task_result = joined.map_err(|err| {
+        runtime_internal_with_stderr(
+            format!("{label} task join failed: {err}"),
+            stderr_diagnostics,
+        )
+    })?;
     if let Err(err) = task_result {
-        return Err(RuntimeError::Internal(format!(
-            "{label} task failed: {err}"
-        )));
+        return Err(runtime_internal_with_stderr(
+            format!("{label} task failed: {err}"),
+            stderr_diagnostics,
+        ));
     }
     Ok(())
+}
+
+fn runtime_internal_with_stderr(
+    message: String,
+    stderr_diagnostics: &StderrDiagnostics,
+) -> RuntimeError {
+    if stderr_diagnostics.has_data() {
+        RuntimeError::Internal(format!("{message}; child stderr tail captured"))
+    } else {
+        RuntimeError::Internal(message)
+    }
 }
 
 async fn wait_child_exit(transport: &mut StdioTransport) -> Result<ExitStatus, RuntimeError> {
@@ -262,57 +379,82 @@ async fn wait_child_exit_inner(
         return Ok(status);
     }
 
-    let child = transport
-        .child
-        .as_mut()
-        .ok_or_else(|| RuntimeError::Internal("child handle missing in transport".to_owned()))?;
+    let child = transport.child.as_mut().ok_or_else(|| {
+        runtime_internal_with_stderr(
+            "child handle missing in transport".to_owned(),
+            transport.stderr_diagnostics.as_ref(),
+        )
+    })?;
 
-    let status =
-        match terminate_grace {
-            None => child
-                .wait()
-                .await
-                .map_err(|err| RuntimeError::Internal(format!("child wait failed: {err}")))?,
-            Some(grace) => match timeout(grace, child.wait()).await {
-                Ok(waited) => waited
-                    .map_err(|err| RuntimeError::Internal(format!("child wait failed: {err}")))?,
-                Err(_) => {
-                    child.kill().await.map_err(|err| {
-                        RuntimeError::Internal(format!("child kill failed: {err}"))
-                    })?;
-                    child.wait().await.map_err(|err| {
-                        RuntimeError::Internal(format!("child wait after kill failed: {err}"))
-                    })?
-                }
-            },
-        };
+    let status = match terminate_grace {
+        None => child.wait().await.map_err(|err| {
+            runtime_internal_with_stderr(
+                format!("child wait failed: {err}"),
+                transport.stderr_diagnostics.as_ref(),
+            )
+        })?,
+        Some(grace) => match timeout(grace, child.wait()).await {
+            Ok(waited) => waited.map_err(|err| {
+                runtime_internal_with_stderr(
+                    format!("child wait failed: {err}"),
+                    transport.stderr_diagnostics.as_ref(),
+                )
+            })?,
+            Err(_) => {
+                child.kill().await.map_err(|err| {
+                    runtime_internal_with_stderr(
+                        format!("child kill failed: {err}"),
+                        transport.stderr_diagnostics.as_ref(),
+                    )
+                })?;
+                child.wait().await.map_err(|err| {
+                    runtime_internal_with_stderr(
+                        format!("child wait after kill failed: {err}"),
+                        transport.stderr_diagnostics.as_ref(),
+                    )
+                })?
+            }
+        },
+    };
     transport.child_exit_status = Some(status);
     Ok(status)
 }
 
 /// Reader loop: one line -> one JSON parse attempt.
-/// Allocation: one reusable String buffer per task. Complexity: O(line_length) per line.
+/// Allocation: one reusable byte buffer per task. Complexity: O(line_length) per line.
 async fn reader_loop(
     stdout: ChildStdout,
     inbound_tx: mpsc::Sender<Value>,
     malformed_line_count: Arc<AtomicU64>,
+    max_inbound_frame_bytes: usize,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stdout);
-    let mut line = String::with_capacity(4096);
+    let mut line = Vec::<u8>::with_capacity(4096);
 
     loop {
         line.clear();
-        let read = reader.read_line(&mut line).await?;
+        let read = {
+            let mut limited_reader = (&mut reader).take((max_inbound_frame_bytes + 1) as u64);
+            limited_reader.read_until(b'\n', &mut line).await?
+        };
         if read == 0 {
             break;
         }
 
-        let raw = line.trim_end_matches(['\n', '\r']);
+        if line.len() > max_inbound_frame_bytes {
+            malformed_line_count.fetch_add(1, Ordering::Relaxed);
+            if !line.ends_with(b"\n") {
+                discard_until_newline(&mut reader).await?;
+            }
+            continue;
+        }
+
+        let raw = trim_ascii_line_endings(line.as_slice());
         if raw.is_empty() {
             continue;
         }
 
-        match serde_json::from_str::<Value>(raw) {
+        match serde_json::from_slice::<Value>(raw) {
             Ok(json) => {
                 if inbound_tx.send(json).await.is_err() {
                     break;
@@ -322,6 +464,44 @@ async fn reader_loop(
                 malformed_line_count.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn discard_until_newline(reader: &mut BufReader<ChildStdout>) -> std::io::Result<()> {
+    loop {
+        let (consume_len, found_newline) = {
+            let buf = reader.fill_buf().await?;
+            if buf.is_empty() {
+                return Ok(());
+            }
+            match buf.iter().position(|byte| *byte == b'\n') {
+                Some(pos) => (pos + 1, true),
+                None => (buf.len(), false),
+            }
+        };
+        reader.consume(consume_len);
+        if found_newline {
+            return Ok(());
+        }
+    }
+}
+
+async fn stderr_loop(
+    stderr: ChildStderr,
+    diagnostics: Arc<StderrDiagnostics>,
+    max_tail_bytes: usize,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stderr);
+    let mut chunk = [0u8; 4096];
+
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        diagnostics.append_chunk(&chunk[..read], max_tail_bytes);
     }
 
     Ok(())
@@ -386,6 +566,7 @@ mod tests {
             StdioTransportConfig {
                 read_channel_capacity: 0,
                 write_channel_capacity: 16,
+                ..StdioTransportConfig::default()
             },
         )
         .await
@@ -400,6 +581,7 @@ mod tests {
             StdioTransportConfig {
                 read_channel_capacity: 16,
                 write_channel_capacity: 0,
+                ..StdioTransportConfig::default()
             },
         )
         .await
@@ -445,6 +627,7 @@ mod tests {
         let joined = transport.join().await.expect("join");
         assert!(joined.exit_status.success());
         assert_eq!(joined.malformed_line_count, 0);
+        assert!(joined.stderr_tail.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -472,6 +655,7 @@ mod tests {
         let joined = transport.join().await.expect("join");
         assert!(joined.exit_status.success());
         assert_eq!(joined.malformed_line_count, 2);
+        assert!(joined.stderr_tail.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -504,5 +688,84 @@ done
         let joined = transport.join().await.expect("join");
         assert!(joined.exit_status.success());
         assert_eq!(joined.malformed_line_count, 0);
+        assert!(joined.stderr_tail.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reader_drops_oversized_frame_and_recovers_next_frame() {
+        let script = r#"
+long=$(head -c 2048 </dev/zero | tr '\0' 'a')
+printf '{"method":"%s"}\n' "$long"
+printf '{"id":1,"result":{"ok":true}}\n'
+"#;
+        let mut transport = StdioTransport::spawn(
+            shell_spec(script),
+            StdioTransportConfig {
+                max_inbound_frame_bytes: 256,
+                ..StdioTransportConfig::default()
+            },
+        )
+        .await
+        .expect("spawn");
+        let mut read_rx = transport.take_read_rx().expect("take rx");
+
+        let mut parsed = Vec::new();
+        while let Some(msg) = timeout(Duration::from_secs(2), read_rx.recv())
+            .await
+            .expect("recv timeout")
+        {
+            parsed.push(msg);
+        }
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["id"], 1);
+        assert_eq!(transport.malformed_line_count(), 1);
+
+        drop(read_rx);
+        let joined = transport.join().await.expect("join");
+        assert!(joined.exit_status.success());
+        assert_eq!(joined.malformed_line_count, 1);
+        assert!(joined.stderr_tail.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn join_exposes_child_stderr_tail_for_diagnostics() {
+        let script = r#"
+printf 'diag-line-1\n' >&2
+printf 'diag-line-2\n' >&2
+"#;
+        let mut transport = StdioTransport::spawn(
+            shell_spec(script),
+            StdioTransportConfig {
+                stderr_tail_max_bytes: 128,
+                ..StdioTransportConfig::default()
+            },
+        )
+        .await
+        .expect("spawn");
+        let read_rx = transport.take_read_rx().expect("take rx");
+        drop(read_rx);
+
+        let joined = transport.join().await.expect("join");
+        assert!(joined.exit_status.success());
+        let stderr_tail = joined.stderr_tail.expect("stderr tail must be captured");
+        assert!(stderr_tail.contains("diag-line-1"));
+        assert!(stderr_tail.contains("diag-line-2"));
+    }
+
+    #[test]
+    fn runtime_internal_with_stderr_redacts_tail_contents() {
+        let diagnostics = StderrDiagnostics::default();
+        diagnostics.append_chunk(b"secret-token\n", 128);
+
+        let RuntimeError::Internal(message) =
+            runtime_internal_with_stderr("transport failed".to_owned(), &diagnostics)
+        else {
+            panic!("expected internal runtime error");
+        };
+
+        assert!(message.contains("transport failed"));
+        assert!(message.contains("child stderr tail captured"));
+        assert!(!message.contains("secret-token"));
     }
 }

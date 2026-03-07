@@ -320,3 +320,33 @@ async fn run_task_sends_interrupt_when_output_collection_fails() {
 
     runtime.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_task_sends_interrupt_when_direct_output_parse_fails() {
+    let temp = TempDir::new("runtime_artifact_interrupt_direct_parse");
+    let store = seeded_store(&temp, "doc:interrupt-direct", "seed\n");
+
+    let interrupt_mark = temp.root.join("interrupt_seen.txt");
+    let interrupt_mark_str = interrupt_mark.to_string_lossy().to_string();
+    let runtime = spawn_interrupt_probe_runtime(&interrupt_mark_str).await;
+    let manager = ArtifactSessionManager::new(runtime.clone(), Arc::clone(&store));
+
+    let spec = make_task_spec(
+        "doc:interrupt-direct",
+        ArtifactTaskKind::Passthrough,
+        "DIRECT_OUTPUT_PARSE_FAIL",
+    );
+    let err = manager.run_task(spec).await.expect_err("must fail");
+    assert!(matches!(err, DomainError::Parse(_)));
+    assert!(
+        interrupt_mark.exists(),
+        "direct-output parse failure must emit turn/interrupt best effort"
+    );
+
+    let persisted = store
+        .load_text("doc:interrupt-direct")
+        .expect("persisted text");
+    assert_eq!(persisted, "seed\n");
+
+    runtime.shutdown().await.expect("shutdown");
+}

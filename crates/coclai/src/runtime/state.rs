@@ -54,6 +54,7 @@ pub enum TurnStatus {
     InProgress,
     Completed,
     Failed,
+    Cancelled,
     Interrupted,
 }
 
@@ -135,6 +136,9 @@ pub fn reduce_in_place_with_limits(
     };
     let seq = envelope.seq;
     let touched_thread_id = envelope.thread_id.as_deref();
+    if is_stale_thread_event(state, touched_thread_id, seq) {
+        return;
+    }
 
     match method {
         events::THREAD_STARTED => handle_thread_started(state, envelope, seq),
@@ -143,6 +147,9 @@ pub fn reduce_in_place_with_limits(
             handle_turn_terminal(state, envelope, seq, TurnStatus::Completed, false)
         }
         events::TURN_FAILED => handle_turn_terminal(state, envelope, seq, TurnStatus::Failed, true),
+        events::TURN_CANCELLED => {
+            handle_turn_terminal(state, envelope, seq, TurnStatus::Cancelled, false)
+        }
         events::TURN_INTERRUPTED => {
             handle_turn_terminal(state, envelope, seq, TurnStatus::Interrupted, false)
         }
@@ -160,6 +167,16 @@ pub fn reduce_in_place_with_limits(
     }
 
     prune_state(state, limits, touched_thread_id);
+}
+
+fn is_stale_thread_event(state: &RuntimeState, thread_id: Option<&str>, seq: u64) -> bool {
+    let Some(thread_id) = thread_id else {
+        return false;
+    };
+    state
+        .threads
+        .get(thread_id)
+        .is_some_and(|thread| seq < thread.last_seq)
 }
 
 fn handle_thread_started(state: &mut RuntimeState, envelope: &Envelope, seq: u64) {
@@ -560,6 +577,27 @@ mod tests {
     }
 
     #[test]
+    fn reduce_turn_cancelled_marks_cancelled_and_clears_active_turn() {
+        let state = RuntimeState::default();
+
+        let state = reduce(
+            state,
+            &envelope("turn/started", "thr", "turn", None, json!({})),
+        );
+        assert_eq!(state.threads["thr"].active_turn.as_deref(), Some("turn"));
+
+        let state = reduce(
+            state,
+            &envelope("turn/cancelled", "thr", "turn", None, json!({})),
+        );
+        assert_eq!(state.threads["thr"].active_turn, None);
+        assert_eq!(
+            state.threads["thr"].turns["turn"].status,
+            TurnStatus::Cancelled
+        );
+    }
+
+    #[test]
     fn reduce_delta_and_output() {
         let state = RuntimeState::default();
         let state = reduce(
@@ -731,5 +769,80 @@ mod tests {
         let thr = state.threads.get("thr_3").expect("thread");
         let turn = thr.turns.get(&turn_id).expect("turn");
         assert!(turn.items.len() <= 2);
+    }
+
+    #[test]
+    fn reduce_drops_stale_turn_event_by_sequence() {
+        let mut state = RuntimeState::default();
+
+        reduce_in_place(
+            &mut state,
+            &envelope_with_seq(10, "turn/started", "thr", "turn", None, json!({})),
+        );
+        reduce_in_place(
+            &mut state,
+            &envelope_with_seq(11, "turn/completed", "thr", "turn", None, json!({})),
+        );
+        reduce_in_place(
+            &mut state,
+            &envelope_with_seq(
+                9,
+                "turn/failed",
+                "thr",
+                "turn",
+                None,
+                json!({"error":{"message":"stale"}}),
+            ),
+        );
+
+        let turn = &state.threads["thr"].turns["turn"];
+        assert_eq!(turn.status, TurnStatus::Completed);
+        assert_eq!(turn.error, None);
+        assert_eq!(turn.last_seq, 11);
+        assert_eq!(state.threads["thr"].last_seq, 11);
+    }
+
+    #[test]
+    fn reduce_drops_stale_item_delta_by_sequence() {
+        let mut state = RuntimeState::default();
+
+        reduce_in_place(
+            &mut state,
+            &envelope_with_seq(
+                1,
+                "item/started",
+                "thr",
+                "turn",
+                Some("item"),
+                json!({"itemType":"agentMessage"}),
+            ),
+        );
+        reduce_in_place(
+            &mut state,
+            &envelope_with_seq(
+                3,
+                "item/agentMessage/delta",
+                "thr",
+                "turn",
+                Some("item"),
+                json!({"delta":"new"}),
+            ),
+        );
+        reduce_in_place(
+            &mut state,
+            &envelope_with_seq(
+                2,
+                "item/agentMessage/delta",
+                "thr",
+                "turn",
+                Some("item"),
+                json!({"delta":"old"}),
+            ),
+        );
+
+        let item = &state.threads["thr"].turns["turn"].items["item"];
+        assert_eq!(item.text_accum, "new");
+        assert_eq!(item.last_seq, 3);
+        assert_eq!(state.threads["thr"].last_seq, 3);
     }
 }

@@ -6,6 +6,8 @@ use crate::runtime::{
     RuntimeError, ServerRequestRx,
 };
 
+mod service;
+
 /// Canonical app-server JSON-RPC method names.
 pub mod methods {
     pub use crate::runtime::rpc_contract::methods::{
@@ -31,70 +33,15 @@ impl AppServer {
         Self { client }
     }
 
-    async fn request_json_validated(
-        &self,
-        method: &str,
-        params: Value,
-        mode: RpcValidationMode,
-    ) -> Result<Value, RpcError> {
-        self.client
-            .runtime()
-            .call_validated_with_mode(method, params, mode)
-            .await
-    }
-
-    async fn request_typed_validated<P, R>(
-        &self,
-        method: &str,
-        params: P,
-        mode: RpcValidationMode,
-    ) -> Result<R, RpcError>
-    where
-        P: Serialize,
-        R: DeserializeOwned,
-    {
-        self.client
-            .runtime()
-            .call_typed_validated_with_mode(method, params, mode)
-            .await
-    }
-
-    async fn notify_json_validated(
-        &self,
-        method: &str,
-        params: Value,
-        mode: RpcValidationMode,
-    ) -> Result<(), RuntimeError> {
-        self.client
-            .runtime()
-            .notify_validated_with_mode(method, params, mode)
-            .await
-    }
-
-    async fn notify_typed_validated<P>(
-        &self,
-        method: &str,
-        params: P,
-        mode: RpcValidationMode,
-    ) -> Result<(), RuntimeError>
-    where
-        P: Serialize,
-    {
-        self.client
-            .runtime()
-            .notify_typed_validated_with_mode(method, params, mode)
-            .await
-    }
-
     /// Connect app-server with explicit config.
     pub async fn connect(config: ClientConfig) -> Result<Self, ClientError> {
-        let client = Client::connect(config).await?;
+        let client = service::connect(config).await?;
         Ok(Self::from_client(client))
     }
 
     /// Connect app-server with default runtime discovery.
     pub async fn connect_default() -> Result<Self, ClientError> {
-        let client = Client::connect_default().await?;
+        let client = service::connect_default().await?;
         Ok(Self::from_client(client))
     }
 
@@ -111,7 +58,7 @@ impl AppServer {
         params: Value,
         mode: RpcValidationMode,
     ) -> Result<Value, RpcError> {
-        self.request_json_validated(method, params, mode).await
+        service::request_json(&self.client, method, params, mode).await
     }
 
     /// Typed JSON-RPC request for known methods.
@@ -135,7 +82,7 @@ impl AppServer {
         P: Serialize,
         R: DeserializeOwned,
     {
-        self.request_typed_validated(method, params, mode).await
+        service::request_typed(&self.client, method, params, mode).await
     }
 
     /// Unchecked JSON-RPC request.
@@ -145,7 +92,7 @@ impl AppServer {
         method: &str,
         params: Value,
     ) -> Result<Value, RpcError> {
-        self.client.runtime().call_raw(method, params).await
+        service::request_json_unchecked(&self.client, method, params).await
     }
 
     /// Validated JSON-RPC notification for known methods.
@@ -161,7 +108,7 @@ impl AppServer {
         params: Value,
         mode: RpcValidationMode,
     ) -> Result<(), RuntimeError> {
-        self.notify_json_validated(method, params, mode).await
+        service::notify_json(&self.client, method, params, mode).await
     }
 
     /// Typed JSON-RPC notification for known methods.
@@ -183,7 +130,7 @@ impl AppServer {
     where
         P: Serialize,
     {
-        self.notify_typed_validated(method, params, mode).await
+        service::notify_typed(&self.client, method, params, mode).await
     }
 
     /// Unchecked JSON-RPC notification.
@@ -192,14 +139,14 @@ impl AppServer {
         method: &str,
         params: Value,
     ) -> Result<(), RuntimeError> {
-        self.client.runtime().notify_raw(method, params).await
+        service::notify_json_unchecked(&self.client, method, params).await
     }
 
     /// Take exclusive server-request stream receiver.
     ///
     /// This enables explicit handling of approval / requestUserInput / tool-call cycles.
     pub async fn take_server_requests(&self) -> Result<ServerRequestRx, RuntimeError> {
-        self.client.runtime().take_server_request_rx().await
+        service::take_server_requests(&self.client).await
     }
 
     /// Reply success payload for one server request.
@@ -208,10 +155,7 @@ impl AppServer {
         approval_id: &str,
         result: Value,
     ) -> Result<(), RuntimeError> {
-        self.client
-            .runtime()
-            .respond_approval_ok(approval_id, result)
-            .await
+        service::respond_server_request_ok(&self.client, approval_id, result).await
     }
 
     /// Reply error payload for one server request.
@@ -220,10 +164,7 @@ impl AppServer {
         approval_id: &str,
         err: RpcErrorObject,
     ) -> Result<(), RuntimeError> {
-        self.client
-            .runtime()
-            .respond_approval_err(approval_id, err)
-            .await
+        service::respond_server_request_err(&self.client, approval_id, err).await
     }
 
     /// Borrow server runtime for full low-level control.
@@ -238,7 +179,7 @@ impl AppServer {
 
     /// Explicit shutdown.
     pub async fn shutdown(&self) -> Result<(), RuntimeError> {
-        self.client.shutdown().await
+        service::shutdown(&self.client).await
     }
 }
 

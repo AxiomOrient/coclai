@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::json;
@@ -271,6 +271,68 @@ for line in sys.stdin:
     crate::test_fixtures::python_inline_process(script)
 }
 
+fn python_clean_exit_once_then_stay(marker_path: &str) -> StdioProcessSpec {
+    let script = r#"
+import json
+import os
+import sys
+
+marker = os.environ.get("RESTART_MARKER")
+exit_clean_after_initialized = bool(marker) and (not os.path.exists(marker))
+if exit_clean_after_initialized:
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("seen")
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    method = msg.get("method")
+    rpc_id = msg.get("id")
+
+    if method == "initialize" and rpc_id is not None:
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ready": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "initialized" and exit_clean_after_initialized:
+        sys.exit(0)
+
+    if method == "crash_now":
+        sys.exit(37)
+
+    if rpc_id is None:
+        continue
+
+    sys.stdout.write(json.dumps({
+        "id": rpc_id,
+        "result": {"echoMethod": method, "params": msg.get("params")}
+    }) + "\n")
+    sys.stdout.flush()
+"#;
+
+    let mut spec = crate::test_fixtures::python_inline_process(script);
+    spec.env
+        .insert("RESTART_MARKER".to_owned(), marker_path.to_owned());
+    spec
+}
+
+fn unique_temp_marker_path(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    std::env::temp_dir()
+        .join(format!("{prefix}_{}_{}", std::process::id(), nanos))
+        .to_string_lossy()
+        .to_string()
+}
+
 fn python_initialize_error_process() -> StdioProcessSpec {
     let script = r#"
 import json
@@ -366,11 +428,20 @@ async fn spawn_runtime_with_supervisor(
     process: StdioProcessSpec,
     restart: RestartPolicy,
 ) -> Runtime {
+    spawn_runtime_with_supervisor_config(process, restart, 30_000).await
+}
+
+async fn spawn_runtime_with_supervisor_config(
+    process: StdioProcessSpec,
+    restart: RestartPolicy,
+    restart_budget_reset_ms: u64,
+) -> Runtime {
     let mut cfg = RuntimeConfig::new(process);
     cfg.supervisor = SupervisorConfig {
         restart,
         shutdown_flush_timeout_ms: 200,
         shutdown_terminate_grace_ms: 200,
+        restart_budget_reset_ms,
     };
     Runtime::spawn_local(cfg).await.expect("runtime spawn")
 }
@@ -529,6 +600,108 @@ mod core_lifecycle {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn supervisor_does_not_restart_after_clean_exit() {
+        let marker = unique_temp_marker_path("runtime_clean_exit_once");
+        let _ = std::fs::remove_file(&marker);
+
+        let runtime = spawn_runtime_with_supervisor(
+            python_clean_exit_once_then_stay(&marker),
+            RestartPolicy::OnCrash {
+                max_restarts: 3,
+                base_backoff_ms: 10,
+                max_backoff_ms: 40,
+            },
+        )
+        .await;
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if runtime.state_snapshot().connection == ConnectionState::Dead {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("dead transition timeout");
+
+        let err = runtime
+            .call_raw("echo/recovered", json!({"phase":"unexpected-restart"}))
+            .await
+            .expect_err("clean exit must not auto-restart under OnCrash");
+        assert!(matches!(err, RpcError::InvalidRequest(_)));
+
+        runtime.shutdown().await.expect("shutdown");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn supervisor_resets_restart_budget_after_stable_window() {
+        let runtime = spawn_runtime_with_supervisor_config(
+            python_restartable_process(),
+            RestartPolicy::OnCrash {
+                max_restarts: 1,
+                base_backoff_ms: 10,
+                max_backoff_ms: 40,
+            },
+            120,
+        )
+        .await;
+
+        let crash_first = runtime.call_raw("crash_now", json!({})).await;
+        assert!(matches!(crash_first, Err(RpcError::TransportClosed)));
+        let recovered_first = wait_for_recovery(&runtime).await;
+        assert_eq!(recovered_first["echoMethod"], "echo/recovered");
+
+        sleep(Duration::from_millis(180)).await;
+
+        let crash_second = runtime.call_raw("crash_now", json!({})).await;
+        assert!(matches!(crash_second, Err(RpcError::TransportClosed)));
+        let recovered_second = wait_for_recovery(&runtime).await;
+        assert_eq!(recovered_second["echoMethod"], "echo/recovered");
+
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_interrupts_supervisor_backoff_sleep() {
+        let runtime = spawn_runtime_with_supervisor(
+            python_restartable_process(),
+            RestartPolicy::OnCrash {
+                max_restarts: 3,
+                base_backoff_ms: 1_500,
+                max_backoff_ms: 1_500,
+            },
+        )
+        .await;
+
+        let crash = runtime.call_raw("crash_now", json!({})).await;
+        assert!(matches!(crash, Err(RpcError::TransportClosed)));
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(
+                    runtime.state_snapshot().connection,
+                    ConnectionState::Restarting { .. }
+                ) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("restarting transition timeout");
+
+        let started = Instant::now();
+        runtime.shutdown().await.expect("shutdown");
+        assert!(
+            started.elapsed() < Duration::from_millis(700),
+            "shutdown waited too long for supervisor backoff sleep: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn supervisor_transitions_dead_after_restart_limit_exceeded() {
         let runtime = spawn_runtime_with_supervisor(
             python_exit_on_initialized_process(),
@@ -612,6 +785,34 @@ mod core_lifecycle {
 
         let metrics = runtime.metrics_snapshot();
         assert_eq!(metrics.pending_rpc_count, 0);
+
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn call_raw_abort_cleans_pending_rpc_entry() {
+        let runtime =
+            spawn_runtime_with_supervisor(python_hold_and_crash_process(), RestartPolicy::Never)
+                .await;
+
+        let runtime_call = runtime.clone();
+        let handle =
+            tokio::spawn(async move { runtime_call.call_raw("hold", json!({"n":99})).await });
+
+        sleep(Duration::from_millis(30)).await;
+        handle.abort();
+        let _ = handle.await;
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if runtime.metrics_snapshot().pending_rpc_count == 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pending rpc cleanup timeout after abort");
 
         runtime.shutdown().await.expect("shutdown");
     }
@@ -753,6 +954,40 @@ mod server_requests {
             assert!(started.elapsed() < Duration::from_secs(1));
             let snapshot = runtime.state_snapshot();
             assert!(snapshot.pending_server_requests.is_empty());
+            runtime.shutdown().await.expect("shutdown");
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn full_server_request_queue_does_not_stall_dispatcher() {
+            let mut cfg = RuntimeConfig::new(python_mock_process());
+            cfg.server_requests = ServerRequestConfig {
+                default_timeout_ms: 30_000,
+                on_timeout: TimeoutAction::Decline,
+                auto_decline_unknown: true,
+            };
+            cfg.server_request_channel_capacity = 1;
+            let runtime = Runtime::spawn_local(cfg).await.expect("runtime spawn");
+
+            // Keep receiver alive but do not drain it so queue stays full after first request.
+            let _server_request_rx = runtime
+                .take_server_request_rx()
+                .await
+                .expect("take server request rx");
+
+            runtime
+                .call_raw("probe_timeout", json!({}))
+                .await
+                .expect("first probe_timeout");
+
+            let second = timeout(
+                Duration::from_secs(1),
+                runtime.call_raw("probe_timeout", json!({})),
+            )
+            .await
+            .expect("second probe_timeout must not stall")
+            .expect("second probe_timeout");
+            assert_eq!(second["echoMethod"], "probe_timeout");
+
             runtime.shutdown().await.expect("shutdown");
         }
 

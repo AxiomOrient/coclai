@@ -5,6 +5,7 @@ pub mod core;
 pub mod errors;
 pub mod events;
 pub mod hooks;
+pub(crate) mod id;
 pub mod metrics;
 pub mod rpc;
 pub mod rpc_contract;
@@ -12,6 +13,7 @@ pub(crate) mod runtime_validation;
 pub mod sink;
 pub mod state;
 pub mod transport;
+pub(crate) mod turn_lifecycle;
 pub mod turn_output;
 
 pub use api::{

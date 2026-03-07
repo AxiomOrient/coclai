@@ -8,8 +8,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use super::lock_policy::{parse_lock_metadata, should_reap_lock, LockMetadata, LockOwnerStatus};
 use super::models::compute_revision;
 use super::{ArtifactMeta, ArtifactStore, FsArtifactStore, SaveMeta, StoreErr};
+
+const LOCK_STALE_FALLBACK_AGE: Duration = Duration::from_secs(30);
 
 impl FsArtifactStore {
     const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -84,7 +87,7 @@ impl FsArtifactStore {
                     });
                 }
                 Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                    if lock_owner_is_definitely_dead(&lock_path) {
+                    if lock_owner_is_stale(&lock_path) {
                         match fs::remove_file(&lock_path) {
                             Ok(()) => continue,
                             Err(remove_err) if remove_err.kind() == ErrorKind::NotFound => {
@@ -123,21 +126,42 @@ fn write_lock_metadata(file: &mut fs::File) -> Result<(), StoreErr> {
     Ok(())
 }
 
-fn lock_owner_is_definitely_dead(path: &Path) -> bool {
+fn lock_owner_is_stale(path: &Path) -> bool {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(_) => return false,
     };
-    let owner_pid = match parse_lock_pid(&raw) {
-        Some(pid) => pid,
+    let metadata = match parse_lock_metadata(&raw) {
+        Some(metadata) => metadata,
         None => return false,
     };
-    !process_is_alive(owner_pid)
+
+    let now_unix_ms = now_unix_millis();
+    let created_unix_ms = resolve_lock_created_unix_millis(path, &metadata);
+    let owner_status = if process_is_alive(metadata.pid) {
+        LockOwnerStatus::Alive
+    } else {
+        LockOwnerStatus::Dead
+    };
+
+    should_reap_lock(
+        owner_status,
+        created_unix_ms,
+        now_unix_ms,
+        LOCK_STALE_FALLBACK_AGE,
+    )
 }
 
-fn parse_lock_pid(raw: &str) -> Option<u32> {
-    let (pid, _) = raw.trim().split_once(':')?;
-    pid.parse::<u32>().ok()
+fn resolve_lock_created_unix_millis(path: &Path, metadata: &LockMetadata) -> Option<u64> {
+    if metadata.created_unix_ms > 0 {
+        return Some(metadata.created_unix_ms);
+    }
+
+    fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 #[cfg(unix)]

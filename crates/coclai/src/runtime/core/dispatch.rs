@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration, MissedTickBehavior};
 use uuid::Uuid;
@@ -16,6 +16,7 @@ use crate::runtime::rpc::{extract_message_metadata, map_rpc_error};
 use crate::runtime::rpc_contract::methods;
 use crate::runtime::sink::EventSink;
 
+use super::io_policy::{compute_deadline_millis, timeout_error_payload, timeout_result_payload};
 use super::rpc_io::resolve_transport_closed_pending;
 use super::state_projection::{
     state_apply_envelope, state_insert_pending_server_request, state_remove_pending_server_request,
@@ -152,8 +153,9 @@ fn route_event_sink(inner: &Arc<RuntimeInner>, envelope: &Envelope) {
 }
 
 /// Enqueue a server request for approval and register its timeout entry.
-/// Side effects: inserts into `pending_server_requests`, increments metrics, sends to channel.
-/// If the send fails (channel closed/full), resolves immediately via timeout policy.
+/// Side effects: inserts into `pending_server_requests`, increments metrics, attempts non-blocking
+/// channel enqueue.
+/// If enqueue fails (channel closed/full), resolves immediately via timeout policy.
 /// Allocation: 4 String clones + one PendingServerRequestEntry. Complexity: O(1).
 async fn queue_server_request(
     inner: &Arc<RuntimeInner>,
@@ -163,7 +165,7 @@ async fn queue_server_request(
 ) {
     let approval_id = Uuid::new_v4().to_string();
     let now = now_millis();
-    let deadline = now + inner.spec.server_request_cfg.default_timeout_ms as i64;
+    let deadline = compute_deadline_millis(now, inner.spec.server_request_cfg.default_timeout_ms);
     let rpc_key = jsonrpc_state_key(&rpc_id);
 
     inner.io.pending_server_requests.lock().await.insert(
@@ -194,18 +196,23 @@ async fn queue_server_request(
         params,
     };
 
-    if inner.io.server_request_tx.send(req).await.is_err() {
-        // Approval queue closed: resolve immediately so pending maps don't leak.
-        let pending = inner
-            .io
-            .pending_server_requests
-            .lock()
-            .await
-            .remove(&approval_id);
-        if let Some(pending) = pending {
-            inner.metrics.dec_pending_server_request();
-            state_remove_pending_server_request(inner, &pending.rpc_key);
-            let _ = respond_with_timeout_policy(inner, &pending.rpc_id, &pending.method).await;
+    match inner.io.server_request_tx.try_send(req) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            // Queue saturated or closed: resolve immediately so pending maps don't leak
+            // and dispatcher keeps draining inbound transport.
+            let pending = inner
+                .io
+                .pending_server_requests
+                .lock()
+                .await
+                .remove(&approval_id);
+            if let Some(pending) = pending {
+                inner.metrics.dec_pending_server_request();
+                state_remove_pending_server_request(inner, &pending.rpc_key);
+                let _ = respond_with_timeout_policy(inner, &pending.rpc_id, &pending.method).await;
+            }
         }
     }
 }
@@ -342,32 +349,12 @@ fn record_event_sink_drop(inner: &Arc<RuntimeInner>, envelope: &Envelope, reason
     tracing::warn!(seq = envelope.seq, method = ?envelope.method, "{reason}");
 }
 
-fn timeout_result_payload(method: &str, cancel: bool) -> Value {
-    match method {
-        "item/tool/requestUserInput" => json!({ "answers": {} }),
-        "item/tool/call" => json!({ "success": false, "contentItems": [] }),
-        _ => {
-            let decision = if cancel { "cancel" } else { "decline" };
-            json!({ "decision": decision })
-        }
-    }
-}
-
 async fn send_timeout_error(
     inner: &Arc<RuntimeInner>,
     rpc_id: &JsonRpcId,
     method: &str,
 ) -> Result<(), RuntimeError> {
-    send_rpc_error(
-        inner,
-        rpc_id,
-        json!({
-            "code": -32000,
-            "message": "server request timed out",
-            "data": { "method": method }
-        }),
-    )
-    .await
+    send_rpc_error(inner, rpc_id, timeout_error_payload(method)).await
 }
 
 pub(super) async fn send_rpc_result(

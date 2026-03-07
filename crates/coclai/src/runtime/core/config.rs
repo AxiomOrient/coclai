@@ -33,6 +33,7 @@ pub struct SupervisorConfig {
     pub restart: RestartPolicy,
     pub shutdown_flush_timeout_ms: u64,
     pub shutdown_terminate_grace_ms: u64,
+    pub restart_budget_reset_ms: u64,
 }
 
 impl Default for SupervisorConfig {
@@ -41,6 +42,7 @@ impl Default for SupervisorConfig {
             restart: RestartPolicy::Never,
             shutdown_flush_timeout_ms: 500,
             shutdown_terminate_grace_ms: 750,
+            restart_budget_reset_ms: 30_000,
         }
     }
 }

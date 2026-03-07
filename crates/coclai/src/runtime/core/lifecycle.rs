@@ -151,25 +151,37 @@ async fn teardown_generation(
     context: TeardownContext,
 ) -> Result<(), RuntimeError> {
     inner.io.outbound_tx.store(None);
+    let mut teardown_error: Option<RuntimeError> = None;
 
     if let Some(transport) = inner.tasks.transport.lock().await.take() {
         let flush_timeout =
             Duration::from_millis(inner.spec.supervisor_cfg.shutdown_flush_timeout_ms);
         let terminate_grace =
             Duration::from_millis(inner.spec.supervisor_cfg.shutdown_terminate_grace_ms);
-        transport
+        if let Err(err) = transport
             .terminate_and_join(flush_timeout, terminate_grace)
-            .await?;
+            .await
+        {
+            record_teardown_error(&mut teardown_error, err);
+        }
     }
 
     if let Some(dispatcher_task) = inner.tasks.dispatcher_task.lock().await.take() {
         let phase = context.dispatcher_join_phase();
-        dispatcher_task.await.map_err(|err| {
-            RuntimeError::Internal(format!("dispatcher task join failed during {phase}: {err}"))
-        })?;
+        if let Err(err) = dispatcher_task.await {
+            record_teardown_error(
+                &mut teardown_error,
+                RuntimeError::Internal(format!(
+                    "dispatcher task join failed during {phase}: {err}"
+                )),
+            );
+        }
     }
 
     resolve_transport_closed_pending(inner).await;
+    if let Some(err) = teardown_error {
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -182,4 +194,15 @@ async fn fail_spawn_generation_with_detach(
         return RuntimeError::Internal(format!("{phase}: {err}; detach failed: {detach_err}"));
     }
     RuntimeError::Internal(format!("{phase}: {err}"))
+}
+
+fn record_teardown_error(slot: &mut Option<RuntimeError>, err: RuntimeError) {
+    match slot.take() {
+        Some(existing) => {
+            *slot = Some(RuntimeError::Internal(format!("{existing}; {err}")));
+        }
+        None => {
+            *slot = Some(err);
+        }
+    }
 }

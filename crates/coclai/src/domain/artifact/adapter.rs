@@ -66,7 +66,7 @@ impl ArtifactPluginAdapter for RuntimeArtifactAdapter {
         spec: &'a ArtifactTaskSpec,
     ) -> ArtifactAdapterFuture<'a, Result<ArtifactTurnOutput, DomainError>> {
         Box::pin(async move {
-            let turn_params = task::build_turn_start_params(thread_id, prompt, spec);
+            let turn_params = task::build_turn_start_params(thread_id, prompt, spec)?;
             let (turn_id, output) =
                 task::run_turn_and_collect_output(&self.runtime, thread_id, turn_params).await?;
             Ok(ArtifactTurnOutput { turn_id, output })

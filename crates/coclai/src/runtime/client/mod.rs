@@ -2,7 +2,9 @@ use thiserror::Error;
 
 use crate::runtime::api::{PromptRunError, PromptRunParams, PromptRunResult};
 use crate::runtime::core::{Runtime, RuntimeConfig};
-use crate::runtime::errors::{RpcError, RuntimeError};
+#[cfg(test)]
+use crate::runtime::errors::RpcError;
+use crate::runtime::errors::RuntimeError;
 use crate::runtime::transport::StdioProcessSpec;
 
 mod compat_guard;
@@ -91,33 +93,6 @@ impl Client {
             .await
     }
 
-    /// Start one default session quickly (safe defaults).
-    /// Side effects: sends thread/start RPC call to app-server.
-    /// Allocation: one cwd String. Complexity: O(cwd length).
-    #[deprecated(
-        since = "0.1.6",
-        note = "Use start_session(SessionConfig::new(cwd)); this alias will be removed after the deprecation window."
-    )]
-    pub async fn setup(&self, cwd: impl Into<String>) -> Result<Session, PromptRunError> {
-        self.start_session(SessionConfig::new(cwd)).await
-    }
-
-    /// Start one session from explicit reusable profile.
-    /// Side effects: sends thread/start RPC call to app-server.
-    /// Allocation: one cwd String + profile field moves. Complexity: O(n), n = attachment count + field sizes.
-    #[deprecated(
-        since = "0.1.6",
-        note = "Use start_session(SessionConfig::from_profile(cwd, profile)); this alias will be removed after the deprecation window."
-    )]
-    pub async fn setup_with_profile(
-        &self,
-        cwd: impl Into<String>,
-        profile: RunProfile,
-    ) -> Result<Session, PromptRunError> {
-        self.start_session(SessionConfig::from_profile(cwd, profile))
-            .await
-    }
-
     /// Start a prepared session and return a reusable handle.
     /// Side effects: sends thread/start RPC call to app-server.
     /// Allocation: clones model/cwd/sandbox into thread-start payload. Complexity: O(n), n = total field sizes.
@@ -148,81 +123,6 @@ impl Client {
             .await?;
 
         Ok(Session::new(self.runtime.clone(), thread.thread_id, config))
-    }
-
-    /// Continue an existing thread with one more prompt using default policies.
-    /// Side effects: sends thread/resume + turn/start RPC calls to app-server.
-    #[deprecated(
-        since = "0.1.6",
-        note = "Use Session::ask on a session handle (or Runtime::run_prompt_in_thread for low-level control)."
-    )]
-    pub async fn continue_session(
-        &self,
-        thread_id: &str,
-        cwd: impl Into<String>,
-        prompt: impl Into<String>,
-    ) -> Result<PromptRunResult, PromptRunError> {
-        self.runtime
-            .run_prompt_in_thread(thread_id, PromptRunParams::new(cwd, prompt))
-            .await
-    }
-
-    /// Continue an existing thread with explicit model/policy/attachment options.
-    /// Side effects: sends thread/resume + turn/start RPC calls to app-server.
-    #[deprecated(
-        since = "0.1.6",
-        note = "Use Session::ask_with on a session handle (or Runtime::run_prompt_in_thread for low-level control)."
-    )]
-    pub async fn continue_session_with(
-        &self,
-        thread_id: &str,
-        params: PromptRunParams,
-    ) -> Result<PromptRunResult, PromptRunError> {
-        self.runtime.run_prompt_in_thread(thread_id, params).await
-    }
-
-    /// Continue an existing thread with one reusable profile.
-    /// Side effects: sends thread/resume + turn/start RPC calls to app-server.
-    /// Allocation: moves profile-owned Strings/vectors + one prompt String. Complexity: O(n), n = attachment count + field sizes.
-    #[deprecated(
-        since = "0.1.6",
-        note = "Use Session::ask_with_profile on a session handle."
-    )]
-    pub async fn continue_session_with_profile(
-        &self,
-        thread_id: &str,
-        cwd: impl Into<String>,
-        prompt: impl Into<String>,
-        profile: RunProfile,
-    ) -> Result<PromptRunResult, PromptRunError> {
-        let (params, hooks) = profile_to_prompt_params_with_hooks(cwd.into(), prompt, profile);
-        self.runtime
-            .run_prompt_in_thread_with_hooks(thread_id, params, Some(&hooks))
-            .await
-    }
-
-    /// Interrupt one in-flight turn by session(thread) id and turn id.
-    /// Side effects: sends turn/interrupt RPC call to app-server.
-    #[deprecated(
-        since = "0.1.6",
-        note = "Use Session::interrupt_turn (or Runtime::turn_interrupt for low-level control)."
-    )]
-    pub async fn interrupt_session_turn(
-        &self,
-        thread_id: &str,
-        turn_id: &str,
-    ) -> Result<(), RpcError> {
-        self.runtime.turn_interrupt(thread_id, turn_id).await
-    }
-
-    /// Archive one session(thread) on server side.
-    /// Side effects: sends thread/archive RPC call to app-server.
-    #[deprecated(
-        since = "0.1.6",
-        note = "Use Session::close (or Runtime::thread_archive for low-level control)."
-    )]
-    pub async fn close_session(&self, thread_id: &str) -> Result<(), RpcError> {
-        self.runtime.thread_archive(thread_id).await
     }
 
     /// Borrow underlying runtime for full low-level control.

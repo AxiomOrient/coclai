@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::plugin::{
     HookAction, HookAttachment, HookContext, HookIssue, HookIssueClass, HookPatch, HookPhase,
     HookReport,
@@ -9,8 +7,7 @@ use serde_json::{Map, Value};
 use crate::runtime::hooks::PreHookDecision;
 
 use super::{
-    PromptAttachment, PromptRunParams, ThreadHandle, ThreadItemPayloadView, ThreadStartParams,
-    ThreadTurnView,
+    PromptAttachment, PromptRunParams, ThreadItemPayloadView, ThreadStartParams, ThreadTurnView,
 };
 
 #[derive(Clone, Debug)]
@@ -284,13 +281,6 @@ pub(super) fn result_status<T, E>(result: &Result<T, E>) -> &'static str {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum LaggedTurnTerminal {
-    Completed { assistant_text: Option<String> },
-    Failed { message: Option<String> },
-    Interrupted,
-}
-
 pub(super) fn extract_assistant_text_from_turn(turn: &ThreadTurnView) -> Option<String> {
     let mut parts = Vec::<String>::new();
     for item in &turn.items {
@@ -305,17 +295,4 @@ pub(super) fn extract_assistant_text_from_turn(turn: &ThreadTurnView) -> Option<
     } else {
         Some(parts.join("\n"))
     }
-}
-
-pub(super) fn interrupt_turn_best_effort(thread: &ThreadHandle, turn_id: &str) {
-    const INTERRUPT_RPC_TIMEOUT: Duration = Duration::from_millis(500);
-
-    let runtime = thread.runtime().clone();
-    let thread_id = thread.thread_id.clone();
-    let turn_id = turn_id.to_owned();
-    tokio::spawn(async move {
-        let _ = runtime
-            .turn_interrupt_with_timeout(&thread_id, &turn_id, INTERRUPT_RPC_TIMEOUT)
-            .await;
-    });
 }

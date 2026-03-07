@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::runtime::api::summarize_sandbox_policy_wire_value;
 use crate::runtime::errors::RpcError;
 use crate::runtime::turn_output::{parse_thread_id, parse_turn_id};
 
@@ -299,39 +300,43 @@ fn require_string(
 fn validate_thread_start_request(params: &Value, method: &str) -> Result<(), RpcError> {
     let obj = require_object(params, method, "params")?;
 
-    // thread/start uses legacy "sandbox" enum string; sandboxPolicy is turn-level.
-    if obj.contains_key("sandboxPolicy") {
-        return Err(invalid_request(
-            method,
-            "params.sandboxPolicy is not valid for thread/start; use params.sandbox",
-            params,
-        ));
-    }
-    if let Some(sandbox) = obj.get("sandbox") {
-        match sandbox.as_str().filter(|value| !value.trim().is_empty()) {
-            Some(_) => {}
-            None => {
-                return Err(invalid_request(
-                    method,
-                    "params.sandbox must be a non-empty string when provided",
-                    params,
-                ));
-            }
-        }
+    if let Some(sandbox_policy) = obj.get("sandboxPolicy") {
+        summarize_sandbox_policy_wire_value(sandbox_policy, "params.sandboxPolicy")
+            .map_err(|reason| invalid_request(method, &reason, params))?;
     }
     Ok(())
 }
 
 fn invalid_request(method: &str, reason: &str, payload: &Value) -> RpcError {
     RpcError::InvalidRequest(format!(
-        "invalid json-rpc request for {method}: {reason}; payload={payload}"
+        "invalid json-rpc request for {method}: {reason}; payload={}",
+        payload_summary(payload)
     ))
 }
 
 fn invalid_response(method: &str, reason: &str, payload: &Value) -> RpcError {
     RpcError::InvalidRequest(format!(
-        "invalid json-rpc response for {method}: {reason}; payload={payload}"
+        "invalid json-rpc response for {method}: {reason}; payload={}",
+        payload_summary(payload)
     ))
+}
+
+pub(crate) fn payload_summary(payload: &Value) -> String {
+    const MAX_KEYS: usize = 6;
+    match payload {
+        Value::Object(map) => {
+            let mut keys: Vec<&str> = map.keys().map(|key| key.as_str()).collect();
+            keys.sort_unstable();
+            let preview: Vec<&str> = keys.into_iter().take(MAX_KEYS).collect();
+            let more = if map.len() > MAX_KEYS { ",..." } else { "" };
+            format!("object(keys=[{}{}])", preview.join(","), more)
+        }
+        Value::Array(items) => format!("array(len={})", items.len()),
+        Value::String(text) => format!("string(len={})", text.len()),
+        Value::Number(_) => "number".to_owned(),
+        Value::Bool(_) => "bool".to_owned(),
+        Value::Null => "null".to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -365,24 +370,35 @@ mod tests {
     }
 
     #[test]
-    fn validates_thread_start_rejects_turn_level_sandbox_policy_key() {
-        let err = validate_rpc_request(
+    fn validates_thread_start_accepts_sandbox_policy_object() {
+        validate_rpc_request(
             "thread/start",
             &json!({"cwd":"/tmp","sandboxPolicy":{"type":"readOnly"}}),
             RpcValidationMode::KnownMethods,
         )
-        .expect_err("thread/start must reject sandboxPolicy key");
+        .expect("thread/start should accept sandboxPolicy object");
+    }
+
+    #[test]
+    fn validates_thread_start_rejects_non_object_sandbox_policy() {
+        let err = validate_rpc_request(
+            "thread/start",
+            &json!({"cwd":"/tmp","sandboxPolicy":"readOnly"}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("thread/start must reject non-object sandboxPolicy");
         assert!(matches!(err, RpcError::InvalidRequest(_)));
     }
 
     #[test]
-    fn validates_thread_start_accepts_legacy_sandbox_string() {
-        validate_rpc_request(
+    fn validates_thread_start_rejects_empty_sandbox_policy_type() {
+        let err = validate_rpc_request(
             "thread/start",
-            &json!({"cwd":"/tmp","sandbox":"read-only"}),
+            &json!({"cwd":"/tmp","sandboxPolicy":{"type":"   "}}),
             RpcValidationMode::KnownMethods,
         )
-        .expect("thread/start should accept sandbox string");
+        .expect_err("thread/start must reject empty sandboxPolicy.type");
+        assert!(matches!(err, RpcError::InvalidRequest(_)));
     }
 
     #[test]
@@ -482,5 +498,53 @@ mod tests {
             .expect("none mode skips params shape");
         validate_rpc_response("turn/start", &json!(null), RpcValidationMode::None)
             .expect("none mode skips result shape");
+    }
+
+    #[test]
+    fn invalid_request_error_redacts_payload_values() {
+        let err = validate_rpc_request(
+            "turn/interrupt",
+            &json!({"threadId":"thr_sensitive","secret":"token-123"}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("missing turnId must fail");
+
+        let RpcError::InvalidRequest(message) = err else {
+            panic!("expected invalid request");
+        };
+        assert!(message.contains("invalid json-rpc request for turn/interrupt"));
+        assert!(message.contains("params.turnId must be a non-empty string"));
+        assert!(message.contains("payload=object(keys=[secret,threadId])"));
+        assert!(!message.contains("token-123"));
+        assert!(!message.contains("thr_sensitive"));
+    }
+
+    #[test]
+    fn invalid_response_error_redacts_payload_values() {
+        let err = validate_rpc_response(
+            "thread/start",
+            &json!({"thread": {}, "secret": {"token":"abc"}}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("missing thread id must fail");
+
+        let RpcError::InvalidRequest(message) = err else {
+            panic!("expected invalid request");
+        };
+        assert!(message.contains("invalid json-rpc response for thread/start"));
+        assert!(message.contains("result is missing thread id"));
+        assert!(message.contains("payload=object(keys=[secret,thread])"));
+        assert!(!message.contains("abc"));
+    }
+
+    #[test]
+    fn rejects_response_scalar_id_fallback() {
+        let err = validate_rpc_response(
+            "thread/start",
+            &json!("thr_scalar"),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("scalar id fallback must not be accepted");
+        assert!(matches!(err, RpcError::InvalidRequest(_)));
     }
 }

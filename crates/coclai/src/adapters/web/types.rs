@@ -87,6 +87,14 @@ pub enum WebError {
     Forbidden,
     #[error("session is closing")]
     SessionClosing,
+    #[error(
+        "session thread conflict: thread={thread_id} existing_artifact={existing_artifact_id} requested_artifact={requested_artifact_id}"
+    )]
+    SessionThreadConflict {
+        thread_id: String,
+        existing_artifact_id: String,
+        requested_artifact_id: String,
+    },
     #[error("internal error: {0}")]
     Internal(String),
 }

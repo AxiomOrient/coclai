@@ -22,7 +22,7 @@ const APPROVAL_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(75);
 const APPROVAL_REQUEST_TIMEOUT: TokioDuration = TokioDuration::from_secs(30);
 const APPROVAL_FILE_TEXT: &str = "approval-needed";
 const REAL_SERVER_APPROVAL_ENV: &str = "COCLAI_REAL_SERVER_APPROVED";
-const ATTACHED_PLAN_ID: &str = "C-RW-065";
+const ATTACHED_DOC_TOKEN: &str = "sandboxPolicy";
 const SESSION_MEMORY_TOKEN: &str = "AXIOM-742";
 const RESUME_MEMORY_TOKEN: &str = "LATTICE-931";
 
@@ -500,24 +500,25 @@ async fn workflow_run_executes_prompt_against_real_codex_server() -> Result<(), 
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "opt-in live test: requires real codex server"]
-async fn quick_run_with_profile_reads_attached_plan_file_against_real_codex_server(
+async fn quick_run_with_profile_reads_attached_core_api_file_against_real_codex_server(
 ) -> Result<(), String> {
     ensure_real_server_opt_in()?;
     let cwd = current_dir_utf8()?;
-    let plan_path = workspace_path_utf8("docs/IMPLEMENTATION-PLAN.md")?;
+    let plan_path = workspace_path_utf8("docs/CORE_API.md")?;
     let profile = RunProfile::new()
         .attach_path(plan_path)
         .with_timeout(Duration::from_secs(120));
-    let prompt = "Read the attached plan document and reply with only the plan id token.";
+    let prompt =
+        "Read the attached API document and reply with only the sandbox policy field name.";
 
     let out = run_with_retries("quick_run_with_profile attachment scenario", || {
         quick_run_with_profile_attempt(cwd.clone(), prompt, profile.clone())
     })
     .await?;
     assert_prompt_result_non_empty("real-server quick_run_with_profile", &out)?;
-    if !out.assistant_text.contains(ATTACHED_PLAN_ID) {
+    if !out.assistant_text.contains(ATTACHED_DOC_TOKEN) {
         return Err(format!(
-            "attachment scenario did not return expected plan id {ATTACHED_PLAN_ID}: {}",
+            "attachment scenario did not return expected API token {ATTACHED_DOC_TOKEN}: {}",
             out.assistant_text
         ));
     }

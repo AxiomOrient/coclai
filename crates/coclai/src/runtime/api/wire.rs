@@ -5,8 +5,9 @@ use crate::runtime::errors::RpcError;
 use crate::runtime::rpc_contract::payload_summary;
 
 use super::{
-    sandbox_policy_to_wire_value, summarize_sandbox_policy, ApprovalPolicy, ByteRange, InputItem,
-    PromptAttachment, TextElement, ThreadStartParams, TurnStartParams,
+    sandbox_policy_to_wire_value, summarize_sandbox_policy, ApprovalPolicy, ByteRange,
+    CommandExecParams, InputItem, PromptAttachment, TextElement, ThreadStartParams,
+    TurnStartParams,
 };
 
 pub(super) fn serialize_params<T: Serialize>(method: &str, params: &T) -> Result<Value, RpcError> {
@@ -105,7 +106,20 @@ fn has_explicit_scope(cwd: Option<&str>, has_non_empty_writable_roots: bool) -> 
 /// Allocation: one JSON object + selected optional fields.
 /// Complexity: O(1) excluding nested JSON clone costs.
 pub(super) fn thread_start_params_to_wire(p: &ThreadStartParams) -> Value {
-    Value::Object(thread_overrides_to_wire(p))
+    let mut params = Map::<String, Value>::new();
+    insert_thread_common_overrides(&mut params, p);
+
+    if let Some(service_name) = p.service_name.as_ref() {
+        params.insert(
+            "serviceName".to_owned(),
+            Value::String(service_name.clone()),
+        );
+    }
+    if let Some(ephemeral) = p.ephemeral {
+        params.insert("ephemeral".to_owned(), Value::Bool(ephemeral));
+    }
+
+    Value::Object(params)
 }
 
 /// Map thread override parameters to wire JSON.
@@ -113,9 +127,28 @@ pub(super) fn thread_start_params_to_wire(p: &ThreadStartParams) -> Value {
 /// Complexity: O(1) excluding nested JSON clone costs.
 pub(super) fn thread_overrides_to_wire(p: &ThreadStartParams) -> Map<String, Value> {
     let mut params = Map::<String, Value>::new();
+    insert_thread_common_overrides(&mut params, p);
+    params
+}
 
+fn insert_thread_common_overrides(params: &mut Map<String, Value>, p: &ThreadStartParams) {
     if let Some(model) = p.model.as_ref() {
         params.insert("model".to_owned(), Value::String(model.clone()));
+    }
+    if let Some(model_provider) = p.model_provider.as_ref() {
+        params.insert(
+            "modelProvider".to_owned(),
+            Value::String(model_provider.clone()),
+        );
+    }
+    if let Some(service_tier) = p.service_tier {
+        params.insert(
+            "serviceTier".to_owned(),
+            match service_tier {
+                Some(service_tier) => Value::String(service_tier.as_wire().to_owned()),
+                None => Value::Null,
+            },
+        );
     }
     if let Some(cwd) = p.cwd.as_ref() {
         params.insert("cwd".to_owned(), Value::String(cwd.clone()));
@@ -128,12 +161,31 @@ pub(super) fn thread_overrides_to_wire(p: &ThreadStartParams) -> Map<String, Val
     }
     if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
         params.insert(
-            "sandboxPolicy".to_owned(),
+            "sandbox".to_owned(),
             sandbox_policy_to_wire_value(sandbox_policy),
         );
     }
-
-    params
+    if let Some(config) = p.config.as_ref() {
+        params.insert("config".to_owned(), Value::Object(config.clone()));
+    }
+    if let Some(base_instructions) = p.base_instructions.as_ref() {
+        params.insert(
+            "baseInstructions".to_owned(),
+            Value::String(base_instructions.clone()),
+        );
+    }
+    if let Some(developer_instructions) = p.developer_instructions.as_ref() {
+        params.insert(
+            "developerInstructions".to_owned(),
+            Value::String(developer_instructions.clone()),
+        );
+    }
+    if let Some(personality) = p.personality {
+        params.insert(
+            "personality".to_owned(),
+            Value::String(personality.as_wire().to_owned()),
+        );
+    }
 }
 
 /// Map turn start parameters to wire JSON.
@@ -165,6 +217,15 @@ pub(super) fn turn_start_params_to_wire(thread_id: &str, p: &TurnStartParams) ->
     if let Some(model) = p.model.as_ref() {
         params.insert("model".to_owned(), Value::String(model.clone()));
     }
+    if let Some(service_tier) = p.service_tier {
+        params.insert(
+            "serviceTier".to_owned(),
+            match service_tier {
+                Some(service_tier) => Value::String(service_tier.as_wire().to_owned()),
+                None => Value::Null,
+            },
+        );
+    }
     if let Some(effort) = p.effort.as_ref() {
         params.insert(
             "effort".to_owned(),
@@ -174,8 +235,102 @@ pub(super) fn turn_start_params_to_wire(thread_id: &str, p: &TurnStartParams) ->
     if let Some(summary) = p.summary.as_ref() {
         params.insert("summary".to_owned(), Value::String(summary.clone()));
     }
+    if let Some(personality) = p.personality {
+        params.insert(
+            "personality".to_owned(),
+            Value::String(personality.as_wire().to_owned()),
+        );
+    }
     if let Some(output_schema) = p.output_schema.as_ref() {
         params.insert("outputSchema".to_owned(), output_schema.clone());
+    }
+
+    Value::Object(params)
+}
+
+/// Map command/exec parameters to wire JSON.
+/// Allocation: one JSON object plus optional nested env/sandbox objects.
+/// Complexity: O(n), n = env entry count + command argv length.
+pub(super) fn command_exec_params_to_wire(p: &CommandExecParams) -> Value {
+    let mut params = Map::<String, Value>::new();
+    params.insert(
+        "command".to_owned(),
+        Value::Array(
+            p.command
+                .iter()
+                .map(|part| Value::String(part.clone()))
+                .collect(),
+        ),
+    );
+
+    if let Some(process_id) = p.process_id.as_ref() {
+        params.insert("processId".to_owned(), Value::String(process_id.clone()));
+    }
+    if p.tty {
+        params.insert("tty".to_owned(), Value::Bool(true));
+        params.insert("streamStdin".to_owned(), Value::Bool(true));
+        params.insert("streamStdoutStderr".to_owned(), Value::Bool(true));
+    } else {
+        if p.stream_stdin {
+            params.insert("streamStdin".to_owned(), Value::Bool(true));
+        }
+        if p.stream_stdout_stderr {
+            params.insert("streamStdoutStderr".to_owned(), Value::Bool(true));
+        }
+    }
+    if let Some(output_bytes_cap) = p.output_bytes_cap {
+        params.insert(
+            "outputBytesCap".to_owned(),
+            Value::Number(serde_json::Number::from(output_bytes_cap as u64)),
+        );
+    }
+    if p.disable_output_cap {
+        params.insert("disableOutputCap".to_owned(), Value::Bool(true));
+    }
+    if p.disable_timeout {
+        params.insert("disableTimeout".to_owned(), Value::Bool(true));
+    }
+    if let Some(timeout_ms) = p.timeout_ms {
+        params.insert(
+            "timeoutMs".to_owned(),
+            Value::Number(serde_json::Number::from(timeout_ms)),
+        );
+    }
+    if let Some(cwd) = p.cwd.as_ref() {
+        params.insert("cwd".to_owned(), Value::String(cwd.clone()));
+    }
+    if let Some(env) = p.env.as_ref() {
+        let env_obj = env
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    match value {
+                        Some(value) => Value::String(value.clone()),
+                        None => Value::Null,
+                    },
+                )
+            })
+            .collect();
+        params.insert("env".to_owned(), Value::Object(env_obj));
+    }
+    if let Some(size) = p.size {
+        let mut size_obj = Map::<String, Value>::new();
+        size_obj.insert(
+            "rows".to_owned(),
+            Value::Number(serde_json::Number::from(size.rows)),
+        );
+        size_obj.insert(
+            "cols".to_owned(),
+            Value::Number(serde_json::Number::from(size.cols)),
+        );
+        params.insert("size".to_owned(), Value::Object(size_obj));
+    }
+    if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
+        params.insert(
+            "sandboxPolicy".to_owned(),
+            sandbox_policy_to_wire_value(sandbox_policy),
+        );
     }
 
     Value::Object(params)
@@ -318,6 +473,7 @@ pub(super) fn thread_start_params_from_prompt(p: &PromptRunParams) -> ThreadStar
         approval_policy: Some(p.approval_policy),
         sandbox_policy: Some(p.sandbox_policy.clone()),
         privileged_escalation_approved: p.privileged_escalation_approved,
+        ..ThreadStartParams::default()
     }
 }
 
@@ -336,7 +492,8 @@ pub(super) fn turn_start_params_from_prompt(
         model: p.model.clone(),
         effort: Some(effort),
         summary: None,
-        output_schema: None,
+        output_schema: p.output_schema.clone(),
+        ..TurnStartParams::default()
     }
 }
 

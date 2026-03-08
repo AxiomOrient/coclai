@@ -35,7 +35,7 @@ mod rpc_io;
 mod state_projection;
 mod supervisor;
 
-pub use config::{RestartPolicy, RuntimeConfig, SupervisorConfig};
+pub use config::{InitializeCapabilities, RestartPolicy, RuntimeConfig, SupervisorConfig};
 use dispatch::event_sink_loop;
 use lifecycle::{shutdown_runtime, spawn_connection_generation};
 use state_projection::state_snapshot_arc;

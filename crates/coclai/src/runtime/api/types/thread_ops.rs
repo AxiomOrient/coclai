@@ -5,7 +5,7 @@ use std::str::FromStr;
 use crate::runtime::core::Runtime;
 
 use super::input::{InputItem, ThreadId, TurnId};
-use super::policies::{ApprovalPolicy, ReasoningEffort, SandboxPolicy};
+use super::policies::{ApprovalPolicy, Personality, ReasoningEffort, SandboxPolicy, ServiceTier};
 use super::thread_views::ThreadView;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -16,8 +16,10 @@ pub struct TurnStartParams {
     pub sandbox_policy: Option<SandboxPolicy>,
     pub privileged_escalation_approved: bool,
     pub model: Option<String>,
+    pub service_tier: Option<Option<ServiceTier>>,
     pub effort: Option<ReasoningEffort>,
     pub summary: Option<String>,
+    pub personality: Option<Personality>,
     pub output_schema: Option<Value>,
 }
 
@@ -44,9 +46,17 @@ impl std::fmt::Debug for ThreadHandle {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThreadStartParams {
     pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub service_tier: Option<Option<ServiceTier>>,
     pub cwd: Option<String>,
     pub approval_policy: Option<ApprovalPolicy>,
     pub sandbox_policy: Option<SandboxPolicy>,
+    pub config: Option<serde_json::Map<String, Value>>,
+    pub service_name: Option<String>,
+    pub base_instructions: Option<String>,
+    pub developer_instructions: Option<String>,
+    pub personality: Option<Personality>,
+    pub ephemeral: Option<bool>,
     pub privileged_escalation_approved: bool,
 }
 

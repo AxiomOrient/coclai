@@ -33,6 +33,7 @@ async fn run_prompt_returns_assistant_text() {
             privileged_escalation_approved: false,
             attachments: vec![],
             timeout: Duration::from_secs(2),
+            output_schema: None,
         })
         .await
         .expect("run prompt");
@@ -55,6 +56,28 @@ async fn run_prompt_simple_returns_assistant_text() {
     assert_eq!(result.thread_id, "thr_prompt");
     assert_eq!(result.turn_id, "turn_prompt");
     assert_eq!(result.assistant_text, "ok-from-run-prompt");
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_prompt_propagates_output_schema_to_turn_start() {
+    let runtime = spawn_run_prompt_runtime().await;
+    let schema = json!({
+        "type": "object",
+        "required": ["answer"],
+        "properties": {
+            "answer": {"type": "string"}
+        }
+    });
+    let result = runtime
+        .run_prompt(PromptRunParams::new("/tmp", "schema probe").with_output_schema(schema.clone()))
+        .await
+        .expect("run prompt");
+
+    let echoed: Value =
+        serde_json::from_str(&result.assistant_text).expect("assistant text must echo schema");
+    assert_eq!(echoed, schema);
 
     runtime.shutdown().await.expect("shutdown");
 }
@@ -408,6 +431,7 @@ async fn run_prompt_preserves_explicit_effort() {
             privileged_escalation_approved: false,
             attachments: vec![],
             timeout: Duration::from_secs(2),
+            output_schema: None,
         })
         .await
         .expect("run prompt");
@@ -431,6 +455,7 @@ async fn run_prompt_surfaces_turn_error_when_text_is_empty() {
             privileged_escalation_approved: false,
             attachments: vec![],
             timeout: Duration::from_secs(2),
+            output_schema: None,
         })
         .await
         .expect_err("run prompt must fail");
@@ -465,6 +490,7 @@ async fn run_prompt_surfaces_turn_failed_with_context() {
             privileged_escalation_approved: false,
             attachments: vec![],
             timeout: Duration::from_secs(2),
+            output_schema: None,
         })
         .await
         .expect_err("run prompt must fail");

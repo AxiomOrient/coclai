@@ -505,7 +505,7 @@ async fn quick_run_with_profile_reads_attached_core_api_file_against_real_codex_
 ) -> Result<(), String> {
     ensure_real_server_opt_in()?;
     let cwd = current_dir_utf8()?;
-    let plan_path = workspace_path_utf8("docs/CORE_API.md")?;
+    let plan_path = workspace_path_utf8("docs/API_REFERENCE.md")?;
     let profile = RunProfile::new()
         .attach_path(plan_path)
         .with_timeout(Duration::from_secs(120));

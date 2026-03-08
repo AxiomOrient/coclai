@@ -466,6 +466,17 @@ mod core_lifecycle {
     use super::*;
 
     #[test]
+    fn runtime_config_enable_experimental_api_updates_initialize_payload() {
+        let cfg = RuntimeConfig::new(python_mock_process())
+            .with_initialize_capabilities(InitializeCapabilities::new().enable_experimental_api());
+
+        assert_eq!(
+            cfg.initialize_params["capabilities"]["experimentalApi"],
+            json!(true)
+        );
+    }
+
+    #[test]
     fn restart_delay_stays_within_base_and_jitter_bounds() {
         for attempt in 0..8 {
             let delay = supervisor::compute_restart_delay(attempt, 10, 160);

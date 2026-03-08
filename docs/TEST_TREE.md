@@ -19,11 +19,11 @@
   - `session_flows` (integration)
 - `crates/coclai/src/appserver/tests`
   - `contract` (unit)
-  - `validated_calls` (contract)
+  - `validated_calls` (contract; low-level typed parity entrypoints)
   - `server_requests` (integration)
 - `crates/coclai/src/runtime/api/tests`
-  - `params_and_types` (unit)
-  - `thread_api` (contract)
+  - `params_and_types` (unit; wire shape, skills, command-exec, thread/turn override serialization)
+  - `thread_api` (contract + integration; low-level thread/turn wrappers, override roundtrip, security boundaries)
   - `run_prompt` (integration)
 - `crates/coclai/src/domain/artifact/tests.rs`
   - `unit_core`
@@ -40,6 +40,7 @@
 - 동일 invariant를 여러 레이어에서 반복 검증하지 않는다.
 - `unit`에서 충분히 보장되는 순수 변환 검증은 `integration`에서 재검증하지 않는다.
 - `integration`은 교차 모듈 상호작용(상태/수명주기/경계 I/O)만 검증한다.
+- 새 typed parity(`skills/list`, `command/exec*`, extended override)는 기본적으로 `unit + contract + mock integration`까지를 표준으로 하고, deterministic 실서버 트리거가 없으면 live gate로 올리지 않는다.
 
 ## 실행 가이드
 - 기본 전체 세트:

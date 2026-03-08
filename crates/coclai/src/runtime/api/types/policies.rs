@@ -3,6 +3,43 @@ use serde_json::{Map, Value};
 use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ServiceTier {
+    #[serde(rename = "fast")]
+    Fast,
+    #[serde(rename = "flex")]
+    Flex,
+}
+
+impl ServiceTier {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Flex => "flex",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Personality {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "friendly")]
+    Friendly,
+    #[serde(rename = "pragmatic")]
+    Pragmatic,
+}
+
+impl Personality {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Friendly => "friendly",
+            Self::Pragmatic => "pragmatic",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ApprovalPolicy {
     #[serde(rename = "untrusted")]
     Untrusted,

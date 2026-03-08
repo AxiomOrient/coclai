@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::runtime::errors::{RpcError, RuntimeError};
@@ -22,6 +23,7 @@ pub struct PromptRunParams {
     pub privileged_escalation_approved: bool,
     pub attachments: Vec<PromptAttachment>,
     pub timeout: Duration,
+    pub output_schema: Option<Value>,
 }
 
 impl PromptRunParams {
@@ -38,6 +40,7 @@ impl PromptRunParams {
             privileged_escalation_approved: false,
             attachments: Vec::new(),
             timeout: Duration::from_secs(120),
+            output_schema: None,
         }
     }
 
@@ -80,6 +83,12 @@ impl PromptRunParams {
     /// Allocation: none. Complexity: O(1).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set one optional JSON Schema for the final assistant message.
+    pub fn with_output_schema(mut self, output_schema: Value) -> Self {
+        self.output_schema = Some(output_schema);
         self
     }
 

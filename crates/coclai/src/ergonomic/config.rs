@@ -2,10 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::Value;
+
 use crate::plugin::{PostHook, PreHook};
 use crate::runtime::{
-    ApprovalPolicy, ClientConfig, CompatibilityGuard, PromptAttachment, ReasoningEffort,
-    RunProfile, RuntimeHookConfig, SandboxPolicy, SessionConfig,
+    ApprovalPolicy, ClientConfig, CompatibilityGuard, InitializeCapabilities, PromptAttachment,
+    ReasoningEffort, RunProfile, RuntimeHookConfig, SandboxPolicy, SessionConfig,
 };
 
 use crate::ergonomic::paths::absolutize_cwd_without_fs_checks;
@@ -64,6 +66,23 @@ impl WorkflowConfig {
         self
     }
 
+    /// Override initialize capability switches.
+    pub fn with_initialize_capabilities(
+        mut self,
+        initialize_capabilities: InitializeCapabilities,
+    ) -> Self {
+        self.client_config = self
+            .client_config
+            .with_initialize_capabilities(initialize_capabilities);
+        self
+    }
+
+    /// Opt into Codex experimental app-server methods and fields.
+    pub fn enable_experimental_api(mut self) -> Self {
+        self.client_config = self.client_config.enable_experimental_api();
+        self
+    }
+
     /// Replace global runtime hooks (connect-time).
     pub fn with_global_hooks(mut self, hooks: RuntimeHookConfig) -> Self {
         self.client_config = self.client_config.with_hooks(hooks);
@@ -109,6 +128,12 @@ impl WorkflowConfig {
     /// Set prompt timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.run_profile = self.run_profile.with_timeout(timeout);
+        self
+    }
+
+    /// Set one optional JSON Schema for the final assistant message.
+    pub fn with_output_schema(mut self, output_schema: Value) -> Self {
+        self.run_profile = self.run_profile.with_output_schema(output_schema);
         self
     }
 

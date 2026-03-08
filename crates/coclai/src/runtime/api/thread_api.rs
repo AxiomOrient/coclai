@@ -318,6 +318,15 @@ impl Runtime {
         deserialize_result(methods::THREAD_LOADED_LIST, response)
     }
 
+    /// List skills for one or more working directories.
+    /// Allocation: serialized params + decoded inventory payload.
+    /// Complexity: O(n), n = number of returned cwd entries + skill metadata size.
+    pub async fn skills_list(&self, p: SkillsListParams) -> Result<SkillsListResponse, RpcError> {
+        let params = serialize_params(methods::SKILLS_LIST, &p)?;
+        let response = self.call_validated(methods::SKILLS_LIST, params).await?;
+        deserialize_result(methods::SKILLS_LIST, response)
+    }
+
     /// Roll back the last `num_turns` turns from a thread.
     /// Allocation: serialized params + decoded response payload.
     /// Complexity: O(n), n = rolled thread payload size.

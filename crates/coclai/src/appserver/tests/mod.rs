@@ -87,6 +87,57 @@ for line in sys.stdin:
 
     if method == "thread/start":
         out = {"id": rpc_id, "result": {"thread": {"id": "thr_appserver"}}}
+    elif method == "skills/list":
+        cwd = (params.get("cwds") or ["."])[0]
+        out = {
+            "id": rpc_id,
+            "result": {
+                "data": [{
+                    "cwd": cwd,
+                    "skills": [{
+                        "name": "skill-creator",
+                        "description": "Create or update a Codex skill",
+                        "path": f"{cwd}/.agents/skills/skill-creator/SKILL.md",
+                        "scope": "repo",
+                        "enabled": True
+                    }],
+                    "errors": []
+                }]
+            }
+        }
+    elif method == "command/exec":
+        process_id = params.get("processId", "generated-proc")
+        if params.get("streamStdoutStderr") or params.get("tty"):
+            sys.stdout.write(json.dumps({
+                "method": "command/exec/outputDelta",
+                "params": {
+                    "processId": process_id,
+                    "stream": "stdout",
+                    "deltaBase64": "c3RyZWFtLW91dA==",
+                    "capReached": False
+                }
+            }) + "\n")
+            sys.stdout.write(json.dumps({
+                "method": "command/exec/outputDelta",
+                "params": {
+                    "processId": process_id,
+                    "stream": "stderr",
+                    "deltaBase64": "c3RyZWFtLWVycg==",
+                    "capReached": False
+                }
+            }) + "\n")
+            out = {"id": rpc_id, "result": {"exitCode": 0, "stdout": "", "stderr": ""}}
+        else:
+            out = {
+                "id": rpc_id,
+                "result": {"exitCode": 0, "stdout": "buffered-stdout", "stderr": "buffered-stderr"},
+            }
+    elif method == "command/exec/write":
+        out = {"id": rpc_id, "result": {}}
+    elif method == "command/exec/resize":
+        out = {"id": rpc_id, "result": {}}
+    elif method == "command/exec/terminate":
+        out = {"id": rpc_id, "result": {}}
     elif method == "thread/read":
         thread_id = params.get("threadId", "thr_appserver")
         out = {"id": rpc_id, "result": {"thread": make_thread(thread_id)}}
@@ -116,7 +167,7 @@ fn thread_start_params() -> Value {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| ".".to_owned()),
         "approvalPolicy": "never",
-        "sandboxPolicy": { "type": "readOnly" }
+        "sandbox": { "type": "readOnly" }
     })
 }
 

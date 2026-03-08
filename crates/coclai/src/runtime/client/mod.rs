@@ -41,9 +41,12 @@ impl Client {
         let mut process = StdioProcessSpec::new(config.cli_bin.clone());
         process.args = vec!["app-server".to_owned()];
 
-        let runtime =
-            Runtime::spawn_local(RuntimeConfig::new(process).with_hooks(config.hooks.clone()))
-                .await?;
+        let runtime = Runtime::spawn_local(
+            RuntimeConfig::new(process)
+                .with_hooks(config.hooks.clone())
+                .with_initialize_capabilities(config.initialize_capabilities),
+        )
+        .await?;
         if let Err(compatibility) =
             validate_runtime_compatibility(&runtime, &config.compatibility_guard)
         {

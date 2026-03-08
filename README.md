@@ -1,40 +1,197 @@
 # coclai
 
-`coclai`는 로컬 `codex app-server`를 Rust에서 안전하게 감싸는 라이브러리입니다.
+`coclai` is a Rust wrapper around the local `codex app-server`—the stdio JSON-RPC backend spawned by the `codex` CLI binary.
 
-## 핵심
-1. 런타임 라이프사이클 표준화 (`connect -> run/setup -> ask -> close -> shutdown`)
-2. JSON-RPC 계약 검증
-3. opt-in 실서버 게이트를 포함한 최소 릴리즈 검증
+It exposes five layers so you can start simple and reach deeper only when needed:
 
-## 저장소 구조
-- `crates/coclai`: 단일 패키지
-- `crates/coclai/src/runtime`: 런타임/JSON-RPC/상태/승인 라우팅
-- `crates/coclai/src/domain/artifact`: artifact 도메인
-- `crates/coclai/src/adapters/web`: web 세션/approval 어댑터
-- `docs`: 유지 중인 공개 문서
-- `scripts`: 릴리즈/품질 게이트 스크립트
+| Layer | Entry point | When to use |
+|-------|-------------|-------------|
+| 1 | `quick_run`, `quick_run_with_profile` | One prompt, disposable session |
+| 2 | `Workflow`, `WorkflowConfig` | Repeated runs in one working directory |
+| 3 | `runtime::{Client, Session}` | Explicit session lifecycle, resume, interrupt |
+| 4 | `AppServer` | Direct JSON-RPC with typed helpers and server-request loop |
+| 5 | `runtime::Runtime` or raw JSON-RPC | Full control, live events, experimental access |
 
-## 설치
+## Install
+
+**Requires:** `codex` CLI >= 0.104.0 installed and available on `$PATH`.
+
+Published crate:
 ```toml
 [dependencies]
-coclai = { path = "crates/coclai" }
+coclai = "0.2.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-## 빠른 시작
+Local workspace dependency:
+```toml
+[dependencies]
+coclai = { path = "crates/coclai" }
+```
+
+## Safe Defaults
+
+All entry points share the same safe defaults unless explicitly overridden:
+
+| Setting | Default |
+|---------|---------|
+| approval | `never` |
+| sandbox | `read-only` |
+| effort | `medium` |
+| timeout | `120s` |
+| privileged escalation | `false` (requires explicit opt-in) |
+
+## High-Level API
+
+### `quick_run`
 ```rust
 use coclai::quick_run;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out = quick_run("/ABS/PATH/WORKDIR", "핵심 3줄 요약").await?;
+    let out = quick_run("/abs/path/workdir", "Summarize this repo in 3 bullets").await?;
     println!("{}", out.assistant_text);
     Ok(())
 }
 ```
 
-## 기본 검증
+### `Workflow`
+```rust
+use coclai::{Workflow, WorkflowConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let workflow = Workflow::connect(
+        WorkflowConfig::new("/abs/path/workdir")
+            .with_model("gpt-4o")
+            .attach_path("docs/API_REFERENCE.md"),
+    )
+    .await?;
+
+    let out = workflow.run("Summarize only the public API").await?;
+    println!("{}", out.assistant_text);
+    workflow.shutdown().await?;
+    Ok(())
+}
+```
+
+## Low-Level Typed API
+
+### `Client` and `Session`
+```rust
+use coclai::runtime::{Client, SessionConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::connect_default().await?;
+    let session = client
+        .start_session(SessionConfig::new("/abs/path/workdir"))
+        .await?;
+
+    let first = session.ask("Summarize the current design").await?;
+    let second = session.ask("Reduce that to 3 lines").await?;
+
+    println!("{}", first.assistant_text);
+    println!("{}", second.assistant_text);
+
+    session.close().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+```
+
+### `AppServer`
+```rust
+use coclai::runtime::CommandExecParams;
+use coclai::AppServer;
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let app = AppServer::connect_default().await?;
+
+    let _thread = app
+        .request_json(
+            coclai::rpc_methods::THREAD_START,
+            json!({
+                "cwd": "/abs/path/workdir",
+                "sandbox": { "type": "readOnly" }
+            }),
+        )
+        .await?;
+
+    let exec = app
+        .command_exec(CommandExecParams {
+            command: vec!["pwd".into()],
+            cwd: Some("/abs/path/workdir".into()),
+            ..CommandExecParams::default()
+        })
+        .await?;
+
+    println!("{}", exec.stdout);
+    app.shutdown().await?;
+    Ok(())
+}
+```
+
+## Defaults And Contracts
+
+- High-level builders stay minimal and do not mirror every upstream field.
+- When you need more control, use `RunProfile`, `SessionConfig`, `ClientConfig`, or `RuntimeConfig`.
+- Use `AppServer` typed helpers for stable low-level parity.
+- Use raw JSON-RPC for experimental or custom methods.
+
+## Public Modules
+
+| Module | Role |
+|--------|------|
+| `coclai` | Root: `quick_run`, `Workflow`, `WorkflowConfig`, `AppServer`, `rpc_methods` |
+| `coclai::runtime` | Low-level runtime: `Client`, `Session`, `Runtime`, typed models, errors |
+| `coclai::plugin` | Hook extension point: `PreHook`, `PostHook`, `HookContext`, `HookPatch` |
+| `coclai::web` | Optional HTTP adapter bridging runtime sessions to SSE/REST web services |
+| `coclai::artifact` | Optional artifact tracking domain built on top of the runtime |
+
+Important runtime submodules available for direct use when re-exports are not enough:
+`runtime::api`, `runtime::approvals`, `runtime::client`, `runtime::core`,
+`runtime::errors`, `runtime::events`, `runtime::hooks`, `runtime::metrics`,
+`runtime::rpc`, `runtime::rpc_contract`, `runtime::sink`, `runtime::state`,
+`runtime::transport`, `runtime::turn_output`
+
+## Hooks
+
+Hooks let you intercept and mutate prompt calls at defined lifecycle phases without forking the call path.
+
+```rust
+use std::sync::Arc;
+use coclai::{WorkflowConfig, plugin::{PreHook, HookContext, HookAction, HookFuture, HookIssue}};
+
+struct LoggingHook;
+
+impl PreHook for LoggingHook {
+    fn name(&self) -> &'static str { "logging" }
+
+    fn call<'a>(&'a self, ctx: &'a HookContext) -> HookFuture<'a, Result<HookAction, HookIssue>> {
+        Box::pin(async move {
+            println!("phase={:?} cwd={:?}", ctx.phase, ctx.cwd);
+            Ok(HookAction::Noop)
+        })
+    }
+}
+
+let config = WorkflowConfig::new("/abs/path/workdir")
+    .with_global_pre_hook(Arc::new(LoggingHook));
+```
+
+Hook phases: `PreRun`, `PostRun`, `PreSessionStart`, `PostSessionStart`, `PreTurn`, `PostTurn`.
+
+## Documentation
+
+- [API_REFERENCE.md](docs/API_REFERENCE.md): full public API surface, typed payload contracts, validation and security rules
+- [TEST_TREE.md](docs/TEST_TREE.md): test layer structure and live-gate boundary
+
+## Quality Gates
+
+Deterministic release gates:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -44,26 +201,25 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-## 릴리즈 preflight
+Release preflight:
 ```bash
 ./scripts/release_preflight.sh
 ```
 
-실서버 opt-in 테스트를 포함하려면:
+Opt-in real-server preflight:
 ```bash
 COCLAI_REAL_SERVER_APPROVED=1 \
 COCLAI_RELEASE_INCLUDE_REAL_SERVER=1 \
 ./scripts/release_preflight.sh
 ```
 
-## 문서 맵
-- `docs/CORE_API.md`: 공개 API, 런타임 계약, opt-in 실서버 게이트
-- `docs/TEST_TREE.md`: 테스트 레이어 구조와 실행 기준
+## Design Boundaries
 
-## 실서버 검증 범위
-- 기본 파이프라인은 deterministic 게이트만 실행
-- opt-in 실서버 게이트는 `quick_run`, `workflow.run`, attachment 포함 `quick_run_with_profile`, session/resume, low-level `AppServer`, approval roundtrip까지 검증
-- `requestUserInput`, dynamic tool-call live 검증은 현재 wrapper 표면 제약 때문에 mock/unit 경로만 유지
+- High-level APIs stay small on purpose.
+- Stable non-experimental upstream fields go to typed APIs first.
+- Experimental fields stay raw until the protocol is stable and testable.
+- `requestUserInput` and dynamic tool-call live coverage remain outside the deterministic release boundary.
 
-## 라이선스
+## License
+
 MIT

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::plugin::{PostHook, PreHook};
 use crate::runtime::hooks::RuntimeHookConfig;
+use crate::runtime::InitializeCapabilities;
 
 use super::CompatibilityGuard;
 
@@ -10,6 +11,7 @@ use super::CompatibilityGuard;
 pub struct ClientConfig {
     pub cli_bin: PathBuf,
     pub compatibility_guard: CompatibilityGuard,
+    pub initialize_capabilities: InitializeCapabilities,
     pub hooks: RuntimeHookConfig,
 }
 
@@ -18,6 +20,7 @@ impl Default for ClientConfig {
         Self {
             cli_bin: PathBuf::from("codex"),
             compatibility_guard: CompatibilityGuard::default(),
+            initialize_capabilities: InitializeCapabilities::default(),
             hooks: RuntimeHookConfig::default(),
         }
     }
@@ -47,6 +50,21 @@ impl ClientConfig {
             require_initialize_user_agent: false,
             min_codex_version: None,
         };
+        self
+    }
+
+    /// Override initialize capability switches.
+    pub fn with_initialize_capabilities(
+        mut self,
+        initialize_capabilities: InitializeCapabilities,
+    ) -> Self {
+        self.initialize_capabilities = initialize_capabilities;
+        self
+    }
+
+    /// Opt into Codex experimental app-server methods and fields.
+    pub fn enable_experimental_api(mut self) -> Self {
+        self.initialize_capabilities = self.initialize_capabilities.enable_experimental_api();
         self
     }
 

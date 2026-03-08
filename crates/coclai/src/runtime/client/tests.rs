@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde_json::json;
+
 use super::{
     ensure_session_open_for_prompt, ensure_session_open_for_rpc, parse_initialize_user_agent,
     profile_to_prompt_params, session_prompt_params, ClientConfig, CompatibilityGuard, RunProfile,
@@ -13,6 +15,7 @@ use crate::runtime::api::{
     ApprovalPolicy, PromptAttachment, ReasoningEffort, SandboxPolicy, SandboxPreset,
 };
 use crate::runtime::hooks::RuntimeHookConfig;
+use crate::runtime::InitializeCapabilities;
 
 #[derive(Debug)]
 struct TempDir {
@@ -81,6 +84,8 @@ for line in sys.stdin:
         text = "ok"
         if len(input_items) > 0 and isinstance(input_items[0], dict):
             text = input_items[0].get("text") or "ok"
+        if params.get("outputSchema") is not None:
+            text = json.dumps(params.get("outputSchema"), sort_keys=True)
 
         sys.stdout.write(json.dumps({"method":"turn/started","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
         sys.stdout.write(json.dumps({"method":"item/started","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_1","itemType":"agentMessage"}}) + "\n")
@@ -437,7 +442,25 @@ fn run_profile_defaults_are_explicit() {
     );
     assert!(!profile.privileged_escalation_approved);
     assert_eq!(profile.timeout, Duration::from_secs(120));
+    assert_eq!(profile.output_schema, None);
     assert!(profile.attachments.is_empty());
+}
+
+#[test]
+fn client_config_initialize_capabilities_are_explicit() {
+    let cfg = ClientConfig::new();
+    assert_eq!(
+        cfg.initialize_capabilities,
+        InitializeCapabilities {
+            experimental_api: false,
+        }
+    );
+}
+
+#[test]
+fn client_config_enable_experimental_api_sets_capability() {
+    let cfg = ClientConfig::new().enable_experimental_api();
+    assert!(cfg.initialize_capabilities.experimental_api);
 }
 
 #[test]
@@ -452,6 +475,7 @@ fn session_config_from_profile_maps_all_fields() {
         }))
         .allow_privileged_escalation()
         .with_timeout(Duration::from_secs(33))
+        .with_output_schema(json!({"type":"object","properties":{"ok":{"type":"boolean"}}}))
         .with_attachment(PromptAttachment::ImageUrl {
             url: "https://example.com/a.png".to_owned(),
         });
@@ -470,6 +494,10 @@ fn session_config_from_profile_maps_all_fields() {
     );
     assert!(cfg.privileged_escalation_approved);
     assert_eq!(cfg.timeout, Duration::from_secs(33));
+    assert_eq!(
+        cfg.output_schema,
+        Some(json!({"type":"object","properties":{"ok":{"type":"boolean"}}}))
+    );
     assert_eq!(
         cfg.attachments,
         vec![PromptAttachment::ImageUrl {
@@ -493,6 +521,7 @@ fn session_prompt_params_maps_config_and_prompt() {
         }))
         .allow_privileged_escalation()
         .with_timeout(Duration::from_secs(33))
+        .with_output_schema(json!({"type":"object","required":["answer"]}))
         .with_attachment(PromptAttachment::ImageUrl {
             url: "https://example.com/a.png".to_owned(),
         });
@@ -513,6 +542,10 @@ fn session_prompt_params_maps_config_and_prompt() {
     assert!(params.privileged_escalation_approved);
     assert_eq!(params.timeout, Duration::from_secs(33));
     assert_eq!(
+        params.output_schema,
+        Some(json!({"type":"object","required":["answer"]}))
+    );
+    assert_eq!(
         params.attachments,
         vec![PromptAttachment::ImageUrl {
             url: "https://example.com/a.png".to_owned()
@@ -532,6 +565,7 @@ fn profile_to_prompt_params_maps_profile_and_input() {
         }))
         .allow_privileged_escalation()
         .with_timeout(Duration::from_secs(15))
+        .with_output_schema(json!({"type":"object","properties":{"text":{"type":"string"}}}))
         .attach_path("README.md");
 
     let params = profile_to_prompt_params("/tmp/work".to_owned(), "hello", profile);
@@ -550,12 +584,40 @@ fn profile_to_prompt_params_maps_profile_and_input() {
     assert!(params.privileged_escalation_approved);
     assert_eq!(params.timeout, Duration::from_secs(15));
     assert_eq!(
+        params.output_schema,
+        Some(json!({"type":"object","properties":{"text":{"type":"string"}}}))
+    );
+    assert_eq!(
         params.attachments,
         vec![PromptAttachment::AtPath {
             path: "README.md".to_owned(),
             placeholder: None
         }]
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_ask_propagates_output_schema_to_turn_start() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "result": {"type": "string"}
+        }
+    });
+    let (temp, client) =
+        connect_mock_client("runtime_client_session_output_schema", ClientConfig::new()).await;
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)).with_output_schema(schema.clone()))
+        .await
+        .expect("start session");
+    let out = session.ask("schema-session").await.expect("ask");
+    let echoed: serde_json::Value =
+        serde_json::from_str(&out.assistant_text).expect("assistant text must echo schema");
+    assert_eq!(echoed, schema);
+
+    session.close().await.expect("close");
+    client.shutdown().await.expect("shutdown");
 }
 
 #[test]

@@ -117,10 +117,100 @@ for line in sys.stdin:
                 "thread": thread
             },
         }
+    elif method == "skills/list":
+        cwds = params.get("cwds") or ["/tmp"]
+        first_cwd = cwds[0] if cwds else "/tmp"
+        out = {
+            "id": rpc_id,
+            "result": {
+                "data": [
+                    {
+                        "cwd": first_cwd,
+                        "skills": [
+                            {
+                                "name": "skill-creator",
+                                "description": "Create or update a Codex skill",
+                                "shortDescription": "Create skills",
+                                "interface": {
+                                    "displayName": "Skill Creator",
+                                    "defaultPrompt": "Create a new skill"
+                                },
+                                "dependencies": {
+                                    "tools": [
+                                        {
+                                            "type": "mcp",
+                                            "value": "github",
+                                            "description": "Needs GitHub MCP"
+                                        }
+                                    ]
+                                },
+                                "path": f"{first_cwd}/.agents/skills/skill-creator/SKILL.md",
+                                "scope": "repo",
+                                "enabled": True
+                            }
+                        ],
+                        "errors": [
+                            {
+                                "path": f"{first_cwd}/.agents/skills/broken/SKILL.md",
+                                "message": "invalid frontmatter"
+                            }
+                        ]
+                    }
+                ]
+            },
+        }
+    elif method == "command/exec":
+        process_id = params.get("processId", "generated-proc")
+        if params.get("streamStdoutStderr") or params.get("tty"):
+            sys.stdout.write(json.dumps({
+                "method": "command/exec/outputDelta",
+                "params": {
+                    "processId": process_id,
+                    "stream": "stdout",
+                    "deltaBase64": "c3RyZWFtLW91dA==",
+                    "capReached": False
+                }
+            }) + "\n")
+            sys.stdout.write(json.dumps({
+                "method": "command/exec/outputDelta",
+                "params": {
+                    "processId": process_id,
+                    "stream": "stderr",
+                    "deltaBase64": "c3RyZWFtLWVycg==",
+                    "capReached": False
+                }
+            }) + "\n")
+            out = {
+                "id": rpc_id,
+                "result": {
+                    "exitCode": 0,
+                    "stdout": "",
+                    "stderr": ""
+                },
+            }
+        else:
+            out = {
+                "id": rpc_id,
+                "result": {
+                    "exitCode": 0,
+                    "stdout": "buffered-stdout",
+                    "stderr": "buffered-stderr"
+                },
+            }
+    elif method == "command/exec/write":
+        out = {"id": rpc_id, "result": {}}
+    elif method == "command/exec/resize":
+        out = {"id": rpc_id, "result": {}}
+    elif method == "command/exec/terminate":
+        out = {"id": rpc_id, "result": {}}
     elif method == "turn/start":
         out = {"id": rpc_id, "result": {"turn": {"id": "turn_typed"}, "echoParams": params}}
     elif method == "turn/interrupt":
         out = {"id": rpc_id, "result": {"ok": True, "turnId": params.get("turnId")}}
+    elif method == "probe_skills_changed":
+        sys.stdout.write(json.dumps({"method":"skills/changed","params":{}}) + "\n")
+        sys.stdout.flush()
+        out = {"id": rpc_id, "result": {"ok": True}}
     else:
         out = {"id": rpc_id, "result": {"echoMethod": method, "params": params}}
 
@@ -174,10 +264,13 @@ for line in sys.stdin:
     if method == "turn/start":
         thread_id = params.get("threadId", "thr_prompt")
         turn_id = "turn_prompt"
+        assistant_text = "ok-from-run-prompt"
+        if params.get("outputSchema") is not None:
+            assistant_text = json.dumps(params.get("outputSchema"), sort_keys=True)
         sys.stdout.write(json.dumps({"method":"turn/started","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
         sys.stdout.write(json.dumps({"method":"item/started","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_prompt","itemType":"agentMessage"}}) + "\n")
-        sys.stdout.write(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_prompt","delta":"ok-from-run-prompt"}}) + "\n")
-        sys.stdout.write(json.dumps({"method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_prompt","item":{"type":"agent_message","text":"ok-from-run-prompt"}}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_prompt","delta":assistant_text}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_prompt","item":{"type":"agent_message","text":assistant_text}}}) + "\n")
         sys.stdout.write(json.dumps({"method":"turn/completed","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
         sys.stdout.write(json.dumps({"id": rpc_id, "result": {"turn": {"id": turn_id}}}) + "\n")
         sys.stdout.flush()

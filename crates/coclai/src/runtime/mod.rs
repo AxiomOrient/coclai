@@ -17,20 +17,25 @@ pub(crate) mod turn_lifecycle;
 pub mod turn_output;
 
 pub use api::{
-    ApprovalPolicy, PromptAttachment, PromptRunError, PromptRunParams, PromptRunResult,
-    ReasoningEffort, SandboxPolicy, SandboxPreset, ThreadAgentMessageItemView,
-    ThreadCommandExecutionItemView, ThreadItemPayloadView, ThreadItemType, ThreadItemView,
-    ThreadListParams, ThreadListResponse, ThreadListSortKey, ThreadLoadedListParams,
-    ThreadLoadedListResponse, ThreadReadParams, ThreadReadResponse, ThreadRollbackParams,
-    ThreadRollbackResponse, ThreadTurnErrorView, ThreadTurnStatus, ThreadTurnView, ThreadView,
-    DEFAULT_REASONING_EFFORT,
+    ApprovalPolicy, CommandExecOutputDeltaNotification, CommandExecOutputStream, CommandExecParams,
+    CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
+    CommandExecTerminalSize, CommandExecTerminateParams, CommandExecTerminateResponse,
+    CommandExecWriteParams, CommandExecWriteResponse, Personality, PromptAttachment,
+    PromptRunError, PromptRunParams, PromptRunResult, ReasoningEffort, SandboxPolicy,
+    SandboxPreset, ServiceTier, SkillDependencies, SkillErrorInfo, SkillInterface, SkillMetadata,
+    SkillScope, SkillToolDependency, SkillsListEntry, SkillsListExtraRootsForCwd, SkillsListParams,
+    SkillsListResponse, ThreadAgentMessageItemView, ThreadCommandExecutionItemView,
+    ThreadItemPayloadView, ThreadItemType, ThreadItemView, ThreadListParams, ThreadListResponse,
+    ThreadListSortKey, ThreadLoadedListParams, ThreadLoadedListResponse, ThreadReadParams,
+    ThreadReadResponse, ThreadRollbackParams, ThreadRollbackResponse, ThreadTurnErrorView,
+    ThreadTurnStatus, ThreadTurnView, ThreadView, DEFAULT_REASONING_EFFORT,
 };
 pub use approvals::{ServerRequest, ServerRequestConfig, TimeoutAction};
 pub use client::{
     Client, ClientConfig, ClientError, CompatibilityGuard, RunProfile, SemVerTriplet, Session,
     SessionConfig,
 };
-pub use core::{RestartPolicy, Runtime, RuntimeConfig, SupervisorConfig};
+pub use core::{InitializeCapabilities, RestartPolicy, Runtime, RuntimeConfig, SupervisorConfig};
 pub use errors::{RpcError, RpcErrorObject, RuntimeError, SinkError};
 pub use hooks::RuntimeHookConfig;
 pub use metrics::RuntimeMetricsSnapshot;

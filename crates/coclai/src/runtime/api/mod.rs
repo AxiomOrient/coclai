@@ -4,6 +4,7 @@ use crate::runtime::rpc_contract::methods;
 use crate::runtime::turn_output::parse_thread_id;
 
 mod attachment_validation;
+mod command_exec_api;
 mod flow;
 mod models;
 mod prompt_run;
@@ -39,14 +40,19 @@ pub(crate) use types::{
     sandbox_policy_to_wire_value, summarize_sandbox_policy, summarize_sandbox_policy_wire_value,
 };
 pub use types::{
-    ApprovalPolicy, ByteRange, ExternalNetworkAccess, InputItem, PromptAttachment, ReasoningEffort,
-    SandboxPolicy, SandboxPreset, TextElement, ThreadAgentMessageItemView,
-    ThreadCommandExecutionItemView, ThreadHandle, ThreadId, ThreadItemPayloadView, ThreadItemType,
-    ThreadItemView, ThreadListParams, ThreadListResponse, ThreadListSortKey,
-    ThreadLoadedListParams, ThreadLoadedListResponse, ThreadReadParams, ThreadReadResponse,
-    ThreadRollbackParams, ThreadRollbackResponse, ThreadStartParams, ThreadTurnErrorView,
-    ThreadTurnStatus, ThreadTurnView, ThreadView, TurnHandle, TurnId, TurnStartParams,
-    DEFAULT_REASONING_EFFORT,
+    ApprovalPolicy, ByteRange, CommandExecOutputDeltaNotification, CommandExecOutputStream,
+    CommandExecParams, CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
+    CommandExecTerminalSize, CommandExecTerminateParams, CommandExecTerminateResponse,
+    CommandExecWriteParams, CommandExecWriteResponse, ExternalNetworkAccess, InputItem,
+    Personality, PromptAttachment, ReasoningEffort, SandboxPolicy, SandboxPreset, ServiceTier,
+    SkillDependencies, SkillErrorInfo, SkillInterface, SkillMetadata, SkillScope,
+    SkillToolDependency, SkillsListEntry, SkillsListExtraRootsForCwd, SkillsListParams,
+    SkillsListResponse, TextElement, ThreadAgentMessageItemView, ThreadCommandExecutionItemView,
+    ThreadHandle, ThreadId, ThreadItemPayloadView, ThreadItemType, ThreadItemView,
+    ThreadListParams, ThreadListResponse, ThreadListSortKey, ThreadLoadedListParams,
+    ThreadLoadedListResponse, ThreadReadParams, ThreadReadResponse, ThreadRollbackParams,
+    ThreadRollbackResponse, ThreadStartParams, ThreadTurnErrorView, ThreadTurnStatus,
+    ThreadTurnView, ThreadView, TurnHandle, TurnId, TurnStartParams, DEFAULT_REASONING_EFFORT,
 };
 
 impl Runtime {

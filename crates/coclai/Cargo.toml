@@ -1,10 +1,13 @@
 [package]
 name = "coclai"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Ergonomic Rust wrapper for codex app-server with runtime safety and release gates."
 license = "MIT"
 repository = "https://github.com/AxiomOrient/coclai"
+readme = "../../README.md"
+keywords = ["codex", "ai", "llm", "automation", "cli"]
+categories = ["asynchronous", "api-bindings", "development-tools"]
 
 [dependencies]
 thiserror = "2"

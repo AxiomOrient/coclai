@@ -1,7 +1,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::super::*;
 
@@ -24,8 +24,10 @@ fn maps_turn_start_params_to_wire_shape() {
         })),
         privileged_escalation_approved: true,
         model: Some("gpt-5".to_owned()),
+        service_tier: Some(Some(ServiceTier::Fast)),
         effort: Some(ReasoningEffort::High),
         summary: Some("brief".to_owned()),
+        personality: Some(Personality::Pragmatic),
         output_schema: Some(json!({"type":"object"})),
     };
 
@@ -39,7 +41,77 @@ fn maps_turn_start_params_to_wire_shape() {
     assert_eq!(wire["sandboxPolicy"]["type"], "workspaceWrite");
     assert_eq!(wire["sandboxPolicy"]["writableRoots"][0], "/tmp");
     assert_eq!(wire["sandboxPolicy"]["networkAccess"], false);
+    assert_eq!(wire["serviceTier"], "fast");
+    assert_eq!(wire["personality"], "pragmatic");
     assert_eq!(wire["outputSchema"]["type"], "object");
+}
+
+#[test]
+fn skills_list_params_and_response_are_camel_case() {
+    let params = SkillsListParams {
+        cwds: vec!["/repo".to_owned()],
+        force_reload: true,
+        per_cwd_extra_user_roots: Some(vec![SkillsListExtraRootsForCwd {
+            cwd: "/repo".to_owned(),
+            extra_user_roots: vec!["/shared-skills".to_owned()],
+        }]),
+    };
+    let wire = serde_json::to_value(&params).expect("serialize skills list params");
+    assert_eq!(wire["cwds"][0], "/repo");
+    assert_eq!(wire["forceReload"], true);
+    assert_eq!(wire["perCwdExtraUserRoots"][0]["cwd"], "/repo");
+    assert_eq!(
+        wire["perCwdExtraUserRoots"][0]["extraUserRoots"][0],
+        "/shared-skills"
+    );
+
+    let response: SkillsListResponse = serde_json::from_value(json!({
+        "data": [{
+            "cwd": "/repo",
+            "skills": [{
+                "name": "skill-creator",
+                "description": "Create or update a Codex skill",
+                "shortDescription": "Create skills",
+                "interface": {
+                    "displayName": "Skill Creator",
+                    "defaultPrompt": "Create a new skill"
+                },
+                "dependencies": {
+                    "tools": [{
+                        "type": "mcp",
+                        "value": "github",
+                        "description": "Needs GitHub MCP"
+                    }]
+                },
+                "path": "/repo/.agents/skills/skill-creator/SKILL.md",
+                "scope": "repo",
+                "enabled": true
+            }],
+            "errors": [{
+                "path": "/repo/.agents/skills/broken/SKILL.md",
+                "message": "invalid frontmatter"
+            }]
+        }]
+    }))
+    .expect("deserialize skills list response");
+    assert_eq!(response.data.len(), 1);
+    assert_eq!(response.data[0].cwd, "/repo");
+    assert_eq!(response.data[0].skills[0].scope, SkillScope::Repo);
+    assert_eq!(
+        response.data[0].skills[0]
+            .interface
+            .as_ref()
+            .and_then(|v| v.display_name.as_deref()),
+        Some("Skill Creator")
+    );
+    assert_eq!(
+        response.data[0].skills[0]
+            .dependencies
+            .as_ref()
+            .map(|v| v.tools.len()),
+        Some(1)
+    );
+    assert_eq!(response.data[0].errors[0].message, "invalid frontmatter");
 }
 
 #[test]
@@ -200,6 +272,7 @@ fn prompt_run_params_defaults_are_explicit() {
     );
     assert!(!params.privileged_escalation_approved);
     assert_eq!(params.timeout, Duration::from_secs(120));
+    assert_eq!(params.output_schema, None);
     assert!(params.attachments.is_empty());
 }
 
@@ -215,10 +288,11 @@ fn prompt_run_params_builder_overrides_defaults() {
         }))
         .allow_privileged_escalation()
         .attach_path("README.md")
-        .attach_path_with_placeholder("docs/CORE_API.md", "core-doc")
+        .attach_path_with_placeholder("docs/API_REFERENCE.md", "core-doc")
         .attach_image_url("https://example.com/a.png")
         .attach_local_image("/tmp/a.png")
         .attach_skill("checks", "/tmp/skill")
+        .with_output_schema(json!({"type":"object","required":["answer"]}))
         .with_timeout(Duration::from_secs(30));
 
     assert_eq!(params.cwd, "/work");
@@ -235,6 +309,10 @@ fn prompt_run_params_builder_overrides_defaults() {
     );
     assert!(params.privileged_escalation_approved);
     assert_eq!(params.timeout, Duration::from_secs(30));
+    assert_eq!(
+        params.output_schema,
+        Some(json!({"type":"object","required":["answer"]}))
+    );
     assert_eq!(params.attachments.len(), 5);
     assert!(matches!(
         params.attachments[0],
@@ -248,7 +326,7 @@ fn prompt_run_params_builder_overrides_defaults() {
         PromptAttachment::AtPath {
             ref path,
             placeholder: Some(ref placeholder)
-        } if path == "docs/CORE_API.md" && placeholder == "core-doc"
+        } if path == "docs/API_REFERENCE.md" && placeholder == "core-doc"
     ));
     assert!(matches!(
         params.attachments[2],
@@ -271,15 +349,68 @@ fn prompt_run_params_builder_overrides_defaults() {
 fn maps_thread_start_params_to_wire_shape() {
     let params = ThreadStartParams {
         model: Some("gpt-5".to_owned()),
+        model_provider: Some("openai".to_owned()),
+        service_tier: Some(None),
         cwd: Some("/work".to_owned()),
         approval_policy: Some(ApprovalPolicy::OnRequest),
         sandbox_policy: Some(SandboxPolicy::Preset(SandboxPreset::ReadOnly)),
+        config: Some(serde_json::Map::from_iter([(
+            "telemetry".to_owned(),
+            json!(true),
+        )])),
+        service_name: Some("codex".to_owned()),
+        base_instructions: Some("base".to_owned()),
+        developer_instructions: Some("dev".to_owned()),
+        personality: Some(Personality::Friendly),
+        ephemeral: Some(true),
         privileged_escalation_approved: false,
     };
 
     let wire = thread_start_params_to_wire(&params);
     assert_eq!(wire["model"], "gpt-5");
+    assert_eq!(wire["modelProvider"], "openai");
+    assert_eq!(wire["serviceTier"], Value::Null);
     assert_eq!(wire["cwd"], "/work");
     assert_eq!(wire["approvalPolicy"], "on-request");
-    assert_eq!(wire["sandboxPolicy"]["type"], "readOnly");
+    assert_eq!(wire["sandbox"]["type"], "readOnly");
+    assert_eq!(wire["config"]["telemetry"], true);
+    assert_eq!(wire["serviceName"], "codex");
+    assert_eq!(wire["baseInstructions"], "base");
+    assert_eq!(wire["developerInstructions"], "dev");
+    assert_eq!(wire["personality"], "friendly");
+    assert_eq!(wire["ephemeral"], true);
+}
+
+#[test]
+fn maps_thread_resume_overrides_to_supported_subset() {
+    let params = ThreadStartParams {
+        model: Some("gpt-5".to_owned()),
+        model_provider: Some("openai".to_owned()),
+        service_tier: Some(Some(ServiceTier::Flex)),
+        cwd: Some("/work".to_owned()),
+        approval_policy: Some(ApprovalPolicy::OnRequest),
+        sandbox_policy: Some(SandboxPolicy::Preset(SandboxPreset::ReadOnly)),
+        config: Some(serde_json::Map::from_iter([(
+            "telemetry".to_owned(),
+            json!(true),
+        )])),
+        service_name: Some("codex".to_owned()),
+        base_instructions: Some("base".to_owned()),
+        developer_instructions: Some("dev".to_owned()),
+        personality: Some(Personality::Friendly),
+        ephemeral: Some(true),
+        privileged_escalation_approved: false,
+    };
+
+    let wire = super::super::wire::thread_overrides_to_wire(&params);
+    assert_eq!(wire["model"], "gpt-5");
+    assert_eq!(wire["modelProvider"], "openai");
+    assert_eq!(wire["serviceTier"], "flex");
+    assert_eq!(wire["sandbox"]["type"], "readOnly");
+    assert_eq!(wire["config"]["telemetry"], true);
+    assert_eq!(wire["baseInstructions"], "base");
+    assert_eq!(wire["developerInstructions"], "dev");
+    assert_eq!(wire["personality"], "friendly");
+    assert!(!wire.contains_key("serviceName"));
+    assert!(!wire.contains_key("ephemeral"));
 }

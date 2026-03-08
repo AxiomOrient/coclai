@@ -47,6 +47,26 @@ impl Default for SupervisorConfig {
     }
 }
 
+/// Initialize capability switches exposed to the child app-server.
+/// Copy type — zero allocation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InitializeCapabilities {
+    pub experimental_api: bool,
+}
+
+impl InitializeCapabilities {
+    /// Create capability set with safe defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Opt into Codex experimental app-server methods and fields.
+    pub fn enable_experimental_api(mut self) -> Self {
+        self.experimental_api = true;
+        self
+    }
+}
+
 // ── Runtime config ────────────────────────────────────────────────────────
 
 /// Full configuration for spawning a Runtime instance.
@@ -102,5 +122,39 @@ impl RuntimeConfig {
     pub fn with_hooks(mut self, hooks: RuntimeHookConfig) -> Self {
         self.hooks = hooks;
         self
+    }
+
+    /// Override initialize capability switches while preserving other init params.
+    pub fn with_initialize_capabilities(mut self, capabilities: InitializeCapabilities) -> Self {
+        set_initialize_capabilities(&mut self.initialize_params, capabilities);
+        self
+    }
+}
+
+fn set_initialize_capabilities(
+    initialize_params: &mut Value,
+    capabilities: InitializeCapabilities,
+) {
+    if !initialize_params.is_object() {
+        *initialize_params = json!({});
+    }
+
+    let Some(root) = initialize_params.as_object_mut() else {
+        return;
+    };
+    let capabilities_value = root
+        .entry("capabilities".to_owned())
+        .or_insert_with(|| Value::Object(Default::default()));
+    if !capabilities_value.is_object() {
+        *capabilities_value = Value::Object(Default::default());
+    }
+
+    let Some(capabilities_object) = capabilities_value.as_object_mut() else {
+        return;
+    };
+    if capabilities.experimental_api {
+        capabilities_object.insert("experimentalApi".to_owned(), Value::Bool(true));
+    } else {
+        capabilities_object.remove("experimentalApi");
     }
 }

@@ -1,6 +1,8 @@
 mod support;
 // Unit: params/types conversion and pure mapping.
 mod params_and_types;
+// Contract/integration: standalone command exec parity.
+mod command_exec;
 // Contract: RPC/thread API shape and policy boundaries.
 mod thread_api;
 // Integration: prompt-run lifecycle end-to-end behavior.

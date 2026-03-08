@@ -14,6 +14,11 @@ pub mod methods {
     pub const THREAD_LIST: &str = "thread/list";
     pub const THREAD_LOADED_LIST: &str = "thread/loaded/list";
     pub const THREAD_ROLLBACK: &str = "thread/rollback";
+    pub const SKILLS_LIST: &str = "skills/list";
+    pub const COMMAND_EXEC: &str = "command/exec";
+    pub const COMMAND_EXEC_WRITE: &str = "command/exec/write";
+    pub const COMMAND_EXEC_TERMINATE: &str = "command/exec/terminate";
+    pub const COMMAND_EXEC_RESIZE: &str = "command/exec/resize";
     pub const TURN_START: &str = "turn/start";
     pub const TURN_INTERRUPT: &str = "turn/interrupt";
 
@@ -37,10 +42,12 @@ pub mod methods {
     pub const ITEM_STARTED: &str = "item/started";
     pub const ITEM_AGENT_MESSAGE_DELTA: &str = "item/agentMessage/delta";
     pub const ITEM_COMMAND_EXECUTION_OUTPUT_DELTA: &str = "item/commandExecution/outputDelta";
+    pub const COMMAND_EXEC_OUTPUT_DELTA: &str = "command/exec/outputDelta";
     pub const ITEM_COMPLETED: &str = "item/completed";
     pub const APPROVAL_ACK: &str = "approval/ack";
+    pub const SKILLS_CHANGED: &str = "skills/changed";
 
-    pub const KNOWN: [&str; 10] = [
+    pub const KNOWN: [&str; 15] = [
         THREAD_START,
         THREAD_RESUME,
         THREAD_FORK,
@@ -49,6 +56,11 @@ pub mod methods {
         THREAD_LIST,
         THREAD_LOADED_LIST,
         THREAD_ROLLBACK,
+        SKILLS_LIST,
+        COMMAND_EXEC,
+        COMMAND_EXEC_WRITE,
+        COMMAND_EXEC_TERMINATE,
+        COMMAND_EXEC_RESIZE,
         TURN_START,
         TURN_INTERRUPT,
     ];
@@ -71,6 +83,10 @@ pub enum RpcRequestContract {
     ThreadStart,
     ThreadId,
     ThreadIdAndTurnId,
+    ProcessId,
+    CommandExec,
+    CommandExecWrite,
+    CommandExecResize,
 }
 
 /// Response-shape rule for one RPC method contract descriptor.
@@ -80,6 +96,7 @@ pub enum RpcResponseContract {
     ThreadId,
     TurnId,
     DataArray,
+    CommandExec,
 }
 
 /// Single-source descriptor for one app-server RPC contract method.
@@ -90,7 +107,7 @@ pub struct RpcContractDescriptor {
     pub response: RpcResponseContract,
 }
 
-const RPC_CONTRACT_DESCRIPTORS: [RpcContractDescriptor; 10] = [
+const RPC_CONTRACT_DESCRIPTORS: [RpcContractDescriptor; 15] = [
     RpcContractDescriptor {
         method: methods::THREAD_START,
         request: RpcRequestContract::ThreadStart,
@@ -130,6 +147,31 @@ const RPC_CONTRACT_DESCRIPTORS: [RpcContractDescriptor; 10] = [
         method: methods::THREAD_ROLLBACK,
         request: RpcRequestContract::ThreadId,
         response: RpcResponseContract::ThreadId,
+    },
+    RpcContractDescriptor {
+        method: methods::SKILLS_LIST,
+        request: RpcRequestContract::Object,
+        response: RpcResponseContract::DataArray,
+    },
+    RpcContractDescriptor {
+        method: methods::COMMAND_EXEC,
+        request: RpcRequestContract::CommandExec,
+        response: RpcResponseContract::CommandExec,
+    },
+    RpcContractDescriptor {
+        method: methods::COMMAND_EXEC_WRITE,
+        request: RpcRequestContract::CommandExecWrite,
+        response: RpcResponseContract::Object,
+    },
+    RpcContractDescriptor {
+        method: methods::COMMAND_EXEC_TERMINATE,
+        request: RpcRequestContract::ProcessId,
+        response: RpcResponseContract::Object,
+    },
+    RpcContractDescriptor {
+        method: methods::COMMAND_EXEC_RESIZE,
+        request: RpcRequestContract::CommandExecResize,
+        response: RpcResponseContract::Object,
     },
     RpcContractDescriptor {
         method: methods::TURN_START,
@@ -212,6 +254,12 @@ fn validate_request_by_descriptor(
             require_string(params, method, "threadId", "params")?;
             require_string(params, method, "turnId", "params")
         }
+        RpcRequestContract::ProcessId => require_string(params, method, "processId", "params"),
+        RpcRequestContract::CommandExec => validate_command_exec_request(params, method),
+        RpcRequestContract::CommandExecWrite => validate_command_exec_write_request(params, method),
+        RpcRequestContract::CommandExecResize => {
+            validate_command_exec_resize_request(params, method)
+        }
     }
 }
 
@@ -258,6 +306,7 @@ fn validate_response_by_descriptor(
                 )),
             }
         }
+        RpcResponseContract::CommandExec => validate_command_exec_response(result, method),
     }
 }
 
@@ -300,11 +349,189 @@ fn require_string(
 fn validate_thread_start_request(params: &Value, method: &str) -> Result<(), RpcError> {
     let obj = require_object(params, method, "params")?;
 
+    if let Some(sandbox_policy) = obj.get("sandbox") {
+        summarize_sandbox_policy_wire_value(sandbox_policy, "params.sandbox")
+            .map_err(|reason| invalid_request(method, &reason, params))?;
+    }
+    Ok(())
+}
+
+fn validate_command_exec_request(params: &Value, method: &str) -> Result<(), RpcError> {
+    let obj = require_object(params, method, "params")?;
+    let command = obj
+        .get("command")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_request(method, "params.command must be an array", params))?;
+    if command.is_empty() {
+        return Err(invalid_request(
+            method,
+            "params.command must not be empty",
+            params,
+        ));
+    }
+    if command.iter().any(|value| value.as_str().is_none()) {
+        return Err(invalid_request(
+            method,
+            "params.command items must be strings",
+            params,
+        ));
+    }
+
+    let process_id = get_optional_non_empty_string(obj, "processId")
+        .map_err(|reason| invalid_request(method, &reason, params))?;
+    let tty = get_bool(obj, "tty");
+    let stream_stdin = get_bool(obj, "streamStdin");
+    let stream_stdout_stderr = get_bool(obj, "streamStdoutStderr");
+    let effective_stream_stdin = tty || stream_stdin;
+    let effective_stream_stdout_stderr = tty || stream_stdout_stderr;
+
+    if (tty || effective_stream_stdin || effective_stream_stdout_stderr) && process_id.is_none() {
+        return Err(invalid_request(
+            method,
+            "params.processId is required when tty or streaming is enabled",
+            params,
+        ));
+    }
+    if get_bool(obj, "disableOutputCap") && obj.get("outputBytesCap").is_some() {
+        return Err(invalid_request(
+            method,
+            "params.disableOutputCap cannot be combined with params.outputBytesCap",
+            params,
+        ));
+    }
+    if get_bool(obj, "disableTimeout") && obj.get("timeoutMs").is_some() {
+        return Err(invalid_request(
+            method,
+            "params.disableTimeout cannot be combined with params.timeoutMs",
+            params,
+        ));
+    }
+    if let Some(timeout_ms) = obj.get("timeoutMs").and_then(Value::as_i64) {
+        if timeout_ms < 0 {
+            return Err(invalid_request(
+                method,
+                "params.timeoutMs must be >= 0",
+                params,
+            ));
+        }
+    }
+    if let Some(output_bytes_cap) = obj.get("outputBytesCap").and_then(Value::as_u64) {
+        if output_bytes_cap == 0 {
+            return Err(invalid_request(
+                method,
+                "params.outputBytesCap must be > 0",
+                params,
+            ));
+        }
+    }
+    if let Some(size) = obj.get("size") {
+        if !tty {
+            return Err(invalid_request(
+                method,
+                "params.size is only valid when params.tty is true",
+                params,
+            ));
+        }
+        validate_command_exec_size(size, method, params)?;
+    }
     if let Some(sandbox_policy) = obj.get("sandboxPolicy") {
         summarize_sandbox_policy_wire_value(sandbox_policy, "params.sandboxPolicy")
             .map_err(|reason| invalid_request(method, &reason, params))?;
     }
+
     Ok(())
+}
+
+fn validate_command_exec_write_request(params: &Value, method: &str) -> Result<(), RpcError> {
+    require_string(params, method, "processId", "params")?;
+    let obj = require_object(params, method, "params")?;
+    let has_delta = obj.get("deltaBase64").and_then(Value::as_str).is_some();
+    let close_stdin = get_bool(obj, "closeStdin");
+    if !has_delta && !close_stdin {
+        return Err(invalid_request(
+            method,
+            "params must include deltaBase64, closeStdin, or both",
+            params,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_command_exec_resize_request(params: &Value, method: &str) -> Result<(), RpcError> {
+    require_string(params, method, "processId", "params")?;
+    let obj = require_object(params, method, "params")?;
+    let size = obj
+        .get("size")
+        .ok_or_else(|| invalid_request(method, "params.size must be an object", params))?;
+    validate_command_exec_size(size, method, params)
+}
+
+fn validate_command_exec_response(result: &Value, method: &str) -> Result<(), RpcError> {
+    let obj = require_object(result, method, "result")?;
+    match obj.get("exitCode").and_then(Value::as_i64) {
+        Some(code) if i32::try_from(code).is_ok() => {}
+        _ => {
+            return Err(invalid_response(
+                method,
+                "result.exitCode must be an i32-compatible integer",
+                result,
+            ));
+        }
+    }
+    if obj.get("stdout").and_then(Value::as_str).is_none() {
+        return Err(invalid_response(
+            method,
+            "result.stdout must be a string",
+            result,
+        ));
+    }
+    if obj.get("stderr").and_then(Value::as_str).is_none() {
+        return Err(invalid_response(
+            method,
+            "result.stderr must be a string",
+            result,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_command_exec_size(size: &Value, method: &str, payload: &Value) -> Result<(), RpcError> {
+    let size_obj = size
+        .as_object()
+        .ok_or_else(|| invalid_request(method, "params.size must be an object", payload))?;
+    let rows = size_obj.get("rows").and_then(Value::as_u64).unwrap_or(0);
+    let cols = size_obj.get("cols").and_then(Value::as_u64).unwrap_or(0);
+    if rows == 0 {
+        return Err(invalid_request(
+            method,
+            "params.size.rows must be > 0",
+            payload,
+        ));
+    }
+    if cols == 0 {
+        return Err(invalid_request(
+            method,
+            "params.size.cols must be > 0",
+            payload,
+        ));
+    }
+    Ok(())
+}
+
+fn get_optional_non_empty_string<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    match obj.get(key) {
+        Some(Value::String(text)) if !text.trim().is_empty() => Ok(Some(text)),
+        Some(Value::String(_)) => Err(format!("params.{key} must be a non-empty string")),
+        Some(_) => Err(format!("params.{key} must be a string")),
+        None => Ok(None),
+    }
+}
+
+fn get_bool(obj: &serde_json::Map<String, Value>, key: &str) -> bool {
+    obj.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 fn invalid_request(method: &str, reason: &str, payload: &Value) -> RpcError {
@@ -373,20 +600,20 @@ mod tests {
     fn validates_thread_start_accepts_sandbox_policy_object() {
         validate_rpc_request(
             "thread/start",
-            &json!({"cwd":"/tmp","sandboxPolicy":{"type":"readOnly"}}),
+            &json!({"cwd":"/tmp","sandbox":{"type":"readOnly"}}),
             RpcValidationMode::KnownMethods,
         )
-        .expect("thread/start should accept sandboxPolicy object");
+        .expect("thread/start should accept sandbox object");
     }
 
     #[test]
     fn validates_thread_start_rejects_non_object_sandbox_policy() {
         let err = validate_rpc_request(
             "thread/start",
-            &json!({"cwd":"/tmp","sandboxPolicy":"readOnly"}),
+            &json!({"cwd":"/tmp","sandbox":"readOnly"}),
             RpcValidationMode::KnownMethods,
         )
-        .expect_err("thread/start must reject non-object sandboxPolicy");
+        .expect_err("thread/start must reject non-object sandbox");
         assert!(matches!(err, RpcError::InvalidRequest(_)));
     }
 
@@ -394,10 +621,10 @@ mod tests {
     fn validates_thread_start_rejects_empty_sandbox_policy_type() {
         let err = validate_rpc_request(
             "thread/start",
-            &json!({"cwd":"/tmp","sandboxPolicy":{"type":"   "}}),
+            &json!({"cwd":"/tmp","sandbox":{"type":"   "}}),
             RpcValidationMode::KnownMethods,
         )
-        .expect_err("thread/start must reject empty sandboxPolicy.type");
+        .expect_err("thread/start must reject empty sandbox.type");
         assert!(matches!(err, RpcError::InvalidRequest(_)));
     }
 
@@ -438,6 +665,68 @@ mod tests {
     }
 
     #[test]
+    fn validates_skills_list_response_shape() {
+        let err = validate_rpc_response(
+            "skills/list",
+            &json!({"skills":[]}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("missing result.data must fail");
+        assert!(matches!(err, RpcError::InvalidRequest(_)));
+
+        validate_rpc_response(
+            "skills/list",
+            &json!({"data":[]}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect("valid response");
+    }
+
+    #[test]
+    fn validates_command_exec_request_constraints() {
+        let err = validate_rpc_request(
+            "command/exec",
+            &json!({"command":["bash"],"tty":true}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("tty without processId must fail");
+        assert!(matches!(err, RpcError::InvalidRequest(_)));
+
+        let err = validate_rpc_request(
+            "command/exec",
+            &json!({"command":["bash"],"disableTimeout":true,"timeoutMs":1}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("disableTimeout + timeoutMs must fail");
+        assert!(matches!(err, RpcError::InvalidRequest(_)));
+
+        validate_rpc_request(
+            "command/exec",
+            &json!({"command":["bash"],"processId":"proc-1","tty":true}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect("tty with processId should pass");
+    }
+
+    #[test]
+    fn validates_command_exec_response_shape() {
+        let err = validate_rpc_response(
+            "command/exec",
+            &json!({"exitCode":0,"stdout":"ok"}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("stderr missing must fail");
+        assert!(matches!(err, RpcError::InvalidRequest(_)));
+
+        validate_rpc_response(
+            "command/exec",
+            &json!({"exitCode":0,"stdout":"ok","stderr":""}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect("valid command exec response");
+    }
+
+    #[test]
     fn passes_unknown_method_in_known_mode() {
         validate_rpc_request(
             "echo/custom",
@@ -466,6 +755,11 @@ mod tests {
                 methods::THREAD_LIST,
                 methods::THREAD_LOADED_LIST,
                 methods::THREAD_ROLLBACK,
+                methods::SKILLS_LIST,
+                methods::COMMAND_EXEC,
+                methods::COMMAND_EXEC_WRITE,
+                methods::COMMAND_EXEC_TERMINATE,
+                methods::COMMAND_EXEC_RESIZE,
                 methods::TURN_START,
                 methods::TURN_INTERRUPT,
             ]

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::Value;
+
 use crate::plugin::{PostHook, PreHook};
 use crate::runtime::api::{
     ApprovalPolicy, PromptAttachment, PromptRunParams, ReasoningEffort, SandboxPolicy,
@@ -17,6 +19,7 @@ struct ProfileCore {
     privileged_escalation_approved: bool,
     attachments: Vec<PromptAttachment>,
     timeout: Duration,
+    output_schema: Option<Value>,
     hooks: RuntimeHookConfig,
 }
 
@@ -30,6 +33,7 @@ impl Default for ProfileCore {
             privileged_escalation_approved: false,
             attachments: Vec::new(),
             timeout: Duration::from_secs(120),
+            output_schema: None,
             hooks: RuntimeHookConfig::default(),
         }
     }
@@ -45,6 +49,7 @@ impl ProfileCore {
             privileged_escalation_approved: self.privileged_escalation_approved,
             attachments: self.attachments,
             timeout: self.timeout,
+            output_schema: self.output_schema,
             hooks: self.hooks,
         }
     }
@@ -59,6 +64,7 @@ impl ProfileCore {
             privileged_escalation_approved: self.privileged_escalation_approved,
             attachments: self.attachments,
             timeout: self.timeout,
+            output_schema: self.output_schema,
             hooks: self.hooks,
         }
     }
@@ -74,6 +80,7 @@ impl ProfileCore {
             privileged_escalation_approved: self.privileged_escalation_approved,
             attachments: self.attachments,
             timeout: self.timeout,
+            output_schema: self.output_schema,
         }
     }
 
@@ -84,6 +91,7 @@ impl ProfileCore {
             approval_policy: Some(self.approval_policy),
             sandbox_policy: Some(self.sandbox_policy),
             privileged_escalation_approved: self.privileged_escalation_approved,
+            ..ThreadStartParams::default()
         }
     }
 }
@@ -98,6 +106,7 @@ impl From<RunProfile> for ProfileCore {
             privileged_escalation_approved: profile.privileged_escalation_approved,
             attachments: profile.attachments,
             timeout: profile.timeout,
+            output_schema: profile.output_schema,
             hooks: profile.hooks,
         }
     }
@@ -113,6 +122,7 @@ impl From<&SessionConfig> for ProfileCore {
             privileged_escalation_approved: config.privileged_escalation_approved,
             attachments: config.attachments.clone(),
             timeout: config.timeout,
+            output_schema: config.output_schema.clone(),
             hooks: config.hooks.clone(),
         }
     }
@@ -158,6 +168,12 @@ macro_rules! impl_profile_builder_methods {
         /// Allocation: none. Complexity: O(1).
         pub fn with_timeout(mut self, timeout: Duration) -> Self {
             self.timeout = timeout;
+            self
+        }
+
+        /// Set one optional JSON Schema for the final assistant message.
+        pub fn with_output_schema(mut self, output_schema: Value) -> Self {
+            self.output_schema = Some(output_schema);
             self
         }
 
@@ -244,6 +260,7 @@ pub struct RunProfile {
     pub privileged_escalation_approved: bool,
     pub attachments: Vec<PromptAttachment>,
     pub timeout: Duration,
+    pub output_schema: Option<Value>,
     pub hooks: RuntimeHookConfig,
 }
 
@@ -274,6 +291,7 @@ pub struct SessionConfig {
     pub privileged_escalation_approved: bool,
     pub attachments: Vec<PromptAttachment>,
     pub timeout: Duration,
+    pub output_schema: Option<Value>,
     pub hooks: RuntimeHookConfig,
 }
 

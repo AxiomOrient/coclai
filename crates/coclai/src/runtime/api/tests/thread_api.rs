@@ -1,5 +1,8 @@
 use crate::runtime::errors::RpcError;
+use crate::runtime::events::extract_skills_changed_notification;
 use serde_json::json;
+use std::time::Duration;
+use tokio::time::timeout;
 
 use super::super::*;
 use super::support::{
@@ -24,6 +27,18 @@ async fn typed_thread_and_turn_roundtrip() {
 
     let thread = runtime
         .thread_start(ThreadStartParams {
+            model: Some("gpt-5".to_owned()),
+            model_provider: Some("openai".to_owned()),
+            service_tier: Some(Some(ServiceTier::Fast)),
+            config: Some(serde_json::Map::from_iter([(
+                "telemetry".to_owned(),
+                json!(true),
+            )])),
+            service_name: Some("codex".to_owned()),
+            base_instructions: Some("base".to_owned()),
+            developer_instructions: Some("dev".to_owned()),
+            personality: Some(Personality::Pragmatic),
+            ephemeral: Some(true),
             approval_policy: Some(ApprovalPolicy::Never),
             sandbox_policy: Some(SandboxPolicy::Preset(SandboxPreset::ReadOnly)),
             ..ThreadStartParams::default()
@@ -37,6 +52,8 @@ async fn typed_thread_and_turn_roundtrip() {
             input: vec![InputItem::Text {
                 text: "hi".to_owned(),
             }],
+            service_tier: Some(Some(ServiceTier::Flex)),
+            personality: Some(Personality::Friendly),
             ..TurnStartParams::default()
         })
         .await
@@ -61,7 +78,17 @@ async fn typed_thread_and_turn_roundtrip() {
         .expect("turn interrupt");
 
     let resumed = runtime
-        .thread_resume("thr_old", ThreadStartParams::default())
+        .thread_resume(
+            "thr_old",
+            ThreadStartParams {
+                model_provider: Some("openai".to_owned()),
+                service_tier: Some(None),
+                base_instructions: Some("resume-base".to_owned()),
+                developer_instructions: Some("resume-dev".to_owned()),
+                personality: Some(Personality::Friendly),
+                ..ThreadStartParams::default()
+            },
+        )
         .await
         .expect("thread resume");
     assert_eq!(resumed.thread_id, "thr_old");
@@ -369,6 +396,58 @@ async fn runtime_thread_read_list_loaded_and_rollback_wrappers_work() {
         }
         other => panic!("unexpected payload: {other:?}"),
     }
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_skills_list_wrapper_roundtrips_inventory() {
+    let runtime = spawn_mock_runtime().await;
+
+    let listed = runtime
+        .skills_list(SkillsListParams {
+            cwds: vec!["/repo".to_owned()],
+            force_reload: true,
+            per_cwd_extra_user_roots: Some(vec![SkillsListExtraRootsForCwd {
+                cwd: "/repo".to_owned(),
+                extra_user_roots: vec!["/shared-skills".to_owned()],
+            }]),
+        })
+        .await
+        .expect("skills list");
+
+    assert_eq!(listed.data.len(), 1);
+    assert_eq!(listed.data[0].cwd, "/repo");
+    assert_eq!(listed.data[0].skills.len(), 1);
+    assert_eq!(listed.data[0].skills[0].name, "skill-creator");
+    assert_eq!(listed.data[0].skills[0].scope, SkillScope::Repo);
+    assert_eq!(listed.data[0].errors.len(), 1);
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_stream_exposes_skills_changed_notification() {
+    let runtime = spawn_mock_runtime().await;
+    let mut live_rx = runtime.subscribe_live();
+
+    runtime
+        .call_raw("probe_skills_changed", json!({}))
+        .await
+        .expect("probe skills changed");
+
+    let envelope = timeout(Duration::from_secs(2), async {
+        loop {
+            let envelope = live_rx.recv().await.expect("live envelope");
+            if extract_skills_changed_notification(&envelope).is_some() {
+                break envelope;
+            }
+        }
+    })
+    .await
+    .expect("skills changed notification");
+
+    assert_eq!(envelope.method.as_deref(), Some("skills/changed"));
 
     runtime.shutdown().await.expect("shutdown");
 }

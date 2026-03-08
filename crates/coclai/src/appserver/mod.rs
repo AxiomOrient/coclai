@@ -2,8 +2,11 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
 use crate::runtime::{
-    Client, ClientConfig, ClientError, RpcError, RpcErrorObject, RpcValidationMode, Runtime,
-    RuntimeError, ServerRequestRx,
+    Client, ClientConfig, ClientError, CommandExecParams, CommandExecResizeParams,
+    CommandExecResizeResponse, CommandExecResponse, CommandExecTerminateParams,
+    CommandExecTerminateResponse, CommandExecWriteParams, CommandExecWriteResponse, RpcError,
+    RpcErrorObject, RpcValidationMode, Runtime, RuntimeError, ServerRequestRx, SkillsListParams,
+    SkillsListResponse,
 };
 
 mod service;
@@ -11,9 +14,10 @@ mod service;
 /// Canonical app-server JSON-RPC method names.
 pub mod methods {
     pub use crate::runtime::rpc_contract::methods::{
-        THREAD_ARCHIVE, THREAD_FORK, THREAD_LIST, THREAD_LOADED_LIST, THREAD_READ, THREAD_RESUME,
-        THREAD_ROLLBACK, THREAD_START, TURN_CANCELLED, TURN_COMPLETED, TURN_FAILED, TURN_INTERRUPT,
-        TURN_START,
+        COMMAND_EXEC, COMMAND_EXEC_OUTPUT_DELTA, COMMAND_EXEC_RESIZE, COMMAND_EXEC_TERMINATE,
+        COMMAND_EXEC_WRITE, SKILLS_CHANGED, SKILLS_LIST, THREAD_ARCHIVE, THREAD_FORK, THREAD_LIST,
+        THREAD_LOADED_LIST, THREAD_READ, THREAD_RESUME, THREAD_ROLLBACK, THREAD_START,
+        TURN_CANCELLED, TURN_COMPLETED, TURN_FAILED, TURN_INTERRUPT, TURN_START,
     };
 }
 
@@ -93,6 +97,46 @@ impl AppServer {
         params: Value,
     ) -> Result<Value, RpcError> {
         service::request_json_unchecked(&self.client, method, params).await
+    }
+
+    /// Typed helper for `skills/list`.
+    pub async fn skills_list(
+        &self,
+        params: SkillsListParams,
+    ) -> Result<SkillsListResponse, RpcError> {
+        self.client.runtime().skills_list(params).await
+    }
+
+    /// Typed helper for `command/exec`.
+    pub async fn command_exec(
+        &self,
+        params: CommandExecParams,
+    ) -> Result<CommandExecResponse, RpcError> {
+        self.client.runtime().command_exec(params).await
+    }
+
+    /// Typed helper for `command/exec/write`.
+    pub async fn command_exec_write(
+        &self,
+        params: CommandExecWriteParams,
+    ) -> Result<CommandExecWriteResponse, RpcError> {
+        self.client.runtime().command_exec_write(params).await
+    }
+
+    /// Typed helper for `command/exec/resize`.
+    pub async fn command_exec_resize(
+        &self,
+        params: CommandExecResizeParams,
+    ) -> Result<CommandExecResizeResponse, RpcError> {
+        self.client.runtime().command_exec_resize(params).await
+    }
+
+    /// Typed helper for `command/exec/terminate`.
+    pub async fn command_exec_terminate(
+        &self,
+        params: CommandExecTerminateParams,
+    ) -> Result<CommandExecTerminateResponse, RpcError> {
+        self.client.runtime().command_exec_terminate(params).await
     }
 
     /// Validated JSON-RPC notification for known methods.

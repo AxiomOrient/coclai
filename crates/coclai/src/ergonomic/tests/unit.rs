@@ -1,8 +1,11 @@
 use super::super::*;
 use super::common::{TestPostHook, TestPreHook};
-use coclai_runtime::HookPhase;
+use crate::runtime::{
+    ApprovalPolicy, PromptRunError, PromptRunResult, ReasoningEffort, RuntimeError, SandboxPolicy,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[test]
 fn workflow_config_defaults_are_safe_and_explicit() {
@@ -12,7 +15,7 @@ fn workflow_config_defaults_are_safe_and_explicit() {
     assert_eq!(config.run_profile.approval_policy, ApprovalPolicy::Never);
     assert_eq!(
         config.run_profile.sandbox_policy,
-        SandboxPolicy::Preset(coclai_runtime::SandboxPreset::ReadOnly)
+        SandboxPolicy::Preset(crate::runtime::SandboxPreset::ReadOnly)
     );
     assert!(config.run_profile.attachments.is_empty());
     assert!(config.run_profile.hooks.pre_hooks.is_empty());
@@ -26,8 +29,8 @@ fn workflow_config_builder_supports_expert_overrides() {
         .with_effort(ReasoningEffort::High)
         .with_approval_policy(ApprovalPolicy::OnRequest)
         .attach_path("README.md")
-        .with_pre_hook(Arc::new(TestPreHook))
-        .with_post_hook(Arc::new(TestPostHook));
+        .with_run_pre_hook(Arc::new(TestPreHook))
+        .with_run_post_hook(Arc::new(TestPostHook));
 
     assert_eq!(config.run_profile.model.as_deref(), Some("gpt-5-codex"));
     assert_eq!(config.run_profile.effort, ReasoningEffort::High);
@@ -56,15 +59,6 @@ fn to_session_config_projects_profile_without_loss() {
     assert_eq!(session.approval_policy, ApprovalPolicy::OnRequest);
     assert_eq!(session.timeout, Duration::from_secs(42));
     assert_eq!(session.attachments.len(), 1);
-}
-
-#[test]
-fn hook_types_compile_with_current_contract() {
-    let pre = TestPreHook;
-    let post = TestPostHook;
-    assert_eq!(pre.name(), "test_pre");
-    assert_eq!(post.name(), "test_post");
-    assert!(matches!(HookPhase::PreRun, HookPhase::PreRun));
 }
 
 #[test]
@@ -111,14 +105,8 @@ fn fold_quick_run_carries_shutdown_error_when_run_fails() {
 
 #[test]
 fn workflow_config_new_makes_relative_path_absolute_without_fs_checks() {
-    let relative = format!(
-        "coclai_nonexistent_{}_segment",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos()
-    );
-    let cfg = WorkflowConfig::new(relative.clone());
+    let relative = "runtime_relative_path_without_fs_check";
+    let cfg = WorkflowConfig::new(relative);
 
     let expected = std::env::current_dir()
         .expect("cwd")
@@ -128,13 +116,10 @@ fn workflow_config_new_makes_relative_path_absolute_without_fs_checks() {
 
 #[test]
 fn workflow_config_new_keeps_absolute_path_stable() {
-    let absolute = std::env::temp_dir().join(format!(
-        "coclai_abs_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos()
-    ));
-    let cfg = WorkflowConfig::new(absolute.to_string_lossy().to_string());
+    let absolute = std::env::temp_dir().join("runtime_abs_path_stable");
+    let absolute_utf8 = absolute
+        .to_str()
+        .expect("temp dir path must be utf-8 in this test");
+    let cfg = WorkflowConfig::new(absolute_utf8.to_owned());
     assert_eq!(PathBuf::from(cfg.cwd), absolute);
 }

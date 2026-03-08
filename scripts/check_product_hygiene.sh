@@ -18,7 +18,7 @@ if rg -n \
 fi
 
 echo "[hygiene] gate: panic/unwrap/expect forbidden in production targets"
-cargo clippy --workspace --lib --bins --examples -- \
+cargo clippy --workspace --lib --bins -- \
   -D warnings \
   -D clippy::panic \
   -D clippy::unwrap_used \

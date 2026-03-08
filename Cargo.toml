@@ -1,11 +1,8 @@
 [workspace]
 members = [
-  "crates/coclai",
-  "crates/coclai_plugin_core",
-  "crates/coclai_runtime",
-  "crates/coclai_artifact",
-  "crates/coclai_web",
+  "crates/coclai"
 ]
+default-members = ["crates/coclai"]
 resolver = "2"
 
 [workspace.package]
@@ -14,7 +11,7 @@ license = "MIT"
 version = "0.1.5"
 
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
 sha2 = "0.10"

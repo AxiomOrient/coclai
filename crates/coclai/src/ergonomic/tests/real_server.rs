@@ -18,8 +18,9 @@ const QUICK_RUN_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(45);
 const WORKFLOW_RUN_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(60);
 const SESSION_RUN_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(75);
 const APPSERVER_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(45);
-const APPROVAL_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(75);
-const APPROVAL_REQUEST_TIMEOUT: TokioDuration = TokioDuration::from_secs(30);
+const APPROVAL_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(180);
+const APPROVAL_REQUEST_TIMEOUT: TokioDuration = TokioDuration::from_secs(90);
+const APPROVAL_COMPLETION_TIMEOUT: TokioDuration = TokioDuration::from_secs(90);
 const APPROVAL_FILE_TEXT: &str = "approval-needed";
 const REAL_SERVER_APPROVAL_ENV: &str = "COCLAI_REAL_SERVER_APPROVED";
 const ATTACHED_DOC_TOKEN: &str = "sandboxPolicy";
@@ -422,7 +423,7 @@ async fn appserver_approval_roundtrip_attempt() -> Result<(), String> {
                 &mut live_rx,
                 &mut stream,
                 2048,
-                APPROVAL_REQUEST_TIMEOUT,
+                APPROVAL_COMPLETION_TIMEOUT,
                 |_| Ok(()),
                 |_| async { Ok(None) },
             )

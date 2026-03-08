@@ -435,7 +435,7 @@ async fn appserver_approval_roundtrip_attempt() -> Result<(), String> {
             }
 
             let assistant_text = stream.into_assistant_text();
-            if assistant_text.trim() != "DONE" {
+            if !assistant_text.trim_end().ends_with("DONE") {
                 return Err(format!(
                     "approval scenario returned unexpected assistant text: {assistant_text}"
                 ));

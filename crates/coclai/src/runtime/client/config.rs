@@ -85,4 +85,13 @@ impl ClientConfig {
         self.hooks.post_hooks.push(hook);
         self
     }
+
+    /// Register one pre-tool-use hook on client runtime config.
+    /// When at least one pre-tool-use hook is registered, the runtime manages the
+    /// approval channel internally and auto-escalates ApprovalPolicy → Untrusted.
+    /// Allocation: amortized O(1) push. Complexity: O(1).
+    pub fn with_pre_tool_use_hook(mut self, hook: Arc<dyn PreHook>) -> Self {
+        self.hooks.pre_tool_use_hooks.push(hook);
+        self
+    }
 }

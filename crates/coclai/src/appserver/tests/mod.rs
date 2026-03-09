@@ -167,7 +167,7 @@ fn thread_start_params() -> Value {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| ".".to_owned()),
         "approvalPolicy": "never",
-        "sandbox": { "type": "readOnly" }
+        "sandbox": "read-only"
     })
 }
 

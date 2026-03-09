@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::plugin::{HookIssueClass, HookPhase};
+use crate::plugin::{HookAction, HookContext, HookIssue, HookIssueClass, HookPhase, PreHook};
 use crate::runtime::{RuntimeConfig, RuntimeHookConfig};
 use serde_json::{json, Value};
 
@@ -18,6 +18,28 @@ use super::support::{
     spawn_run_prompt_turn_failed_runtime, MetadataCapturePostHook, PhasePatchPreHook,
     RecordingPostHook, RecordingPreHook,
 };
+
+#[derive(Clone)]
+struct CaptureCwdPreHook {
+    cwd_values: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+impl PreHook for CaptureCwdPreHook {
+    fn name(&self) -> &'static str {
+        "capture_cwd"
+    }
+
+    fn call<'a>(
+        &'a self,
+        ctx: &'a HookContext,
+    ) -> crate::plugin::HookFuture<'a, Result<HookAction, HookIssue>> {
+        let cwd_values = Arc::clone(&self.cwd_values);
+        Box::pin(async move {
+            cwd_values.lock().expect("cwd lock").push(ctx.cwd.clone());
+            Ok(HookAction::Noop)
+        })
+    }
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn run_prompt_returns_assistant_text() {
@@ -135,6 +157,30 @@ async fn run_prompt_hook_order_is_pre_then_post() {
             "pre:PreTurn".to_owned(),
             "post:PostTurn".to_owned(),
             "post:PostRun".to_owned(),
+        ]
+    );
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_prompt_pre_hooks_receive_working_directory_not_prompt_text() {
+    let cwd_values = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let hooks = RuntimeHookConfig::new().with_pre_hook(Arc::new(CaptureCwdPreHook {
+        cwd_values: Arc::clone(&cwd_values),
+    }));
+    let runtime = spawn_run_prompt_runtime_with_hooks(hooks).await;
+
+    runtime
+        .run_prompt(PromptRunParams::new("/tmp/hook-cwd", "say ok"))
+        .await
+        .expect("run prompt");
+
+    assert_eq!(
+        cwd_values.lock().expect("cwd lock").as_slice(),
+        &[
+            Some("/tmp/hook-cwd".to_owned()),
+            Some("/tmp/hook-cwd".to_owned())
         ]
     );
 

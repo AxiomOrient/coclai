@@ -14,3 +14,5 @@ pub use adapters::web;
 pub use appserver::{methods as rpc_methods, AppServer};
 pub use domain::artifact;
 pub use ergonomic::{quick_run, quick_run_with_profile, QuickRunError, Workflow, WorkflowConfig};
+pub use plugin::{FilteredPostHook, FilteredPreHook, HookMatcher};
+pub use runtime::ShellCommandHook;

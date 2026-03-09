@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod rpc;
 pub mod rpc_contract;
 pub(crate) mod runtime_validation;
+pub mod shell_hook;
 pub mod sink;
 pub mod state;
 pub mod transport;
@@ -40,6 +41,7 @@ pub use errors::{RpcError, RpcErrorObject, RuntimeError, SinkError};
 pub use hooks::RuntimeHookConfig;
 pub use metrics::RuntimeMetricsSnapshot;
 pub use rpc_contract::RpcValidationMode;
+pub use shell_hook::ShellCommandHook;
 pub use transport::{StdioProcessSpec, StdioTransportConfig};
 
 pub type ServerRequestRx = tokio::sync::mpsc::Receiver<ServerRequest>;

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::runtime::api::summarize_sandbox_policy_wire_value;
+use crate::runtime::api::{normalize_sandbox_mode_alias, summarize_sandbox_policy_wire_value};
 use crate::runtime::errors::RpcError;
 use crate::runtime::turn_output::{parse_thread_id, parse_turn_id};
 
@@ -349,9 +349,37 @@ fn require_string(
 fn validate_thread_start_request(params: &Value, method: &str) -> Result<(), RpcError> {
     let obj = require_object(params, method, "params")?;
 
-    if let Some(sandbox_policy) = obj.get("sandbox") {
-        summarize_sandbox_policy_wire_value(sandbox_policy, "params.sandbox")
-            .map_err(|reason| invalid_request(method, &reason, params))?;
+    if let Some(sandbox_mode) = obj.get("sandbox") {
+        validate_thread_sandbox_mode(sandbox_mode, method, params)?;
+    }
+    Ok(())
+}
+
+fn validate_thread_sandbox_mode(
+    sandbox_mode: &Value,
+    method: &str,
+    payload: &Value,
+) -> Result<(), RpcError> {
+    let Some(raw_mode) = sandbox_mode.as_str() else {
+        return Err(invalid_request(
+            method,
+            "params.sandbox must be a non-empty string",
+            payload,
+        ));
+    };
+    let normalized = normalize_sandbox_mode_alias(raw_mode).ok_or_else(|| {
+        invalid_request(
+            method,
+            "params.sandbox must be one of read-only, workspace-write, danger-full-access",
+            payload,
+        )
+    })?;
+    if normalized.is_empty() {
+        return Err(invalid_request(
+            method,
+            "params.sandbox must be a non-empty string",
+            payload,
+        ));
     }
     Ok(())
 }
@@ -597,34 +625,34 @@ mod tests {
     }
 
     #[test]
-    fn validates_thread_start_accepts_sandbox_policy_object() {
+    fn validates_thread_start_accepts_string_sandbox_mode() {
         validate_rpc_request(
+            "thread/start",
+            &json!({"cwd":"/tmp","sandbox":"read-only"}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect("thread/start should accept sandbox mode");
+    }
+
+    #[test]
+    fn validates_thread_start_rejects_non_string_sandbox_mode() {
+        let err = validate_rpc_request(
             "thread/start",
             &json!({"cwd":"/tmp","sandbox":{"type":"readOnly"}}),
             RpcValidationMode::KnownMethods,
         )
-        .expect("thread/start should accept sandbox object");
-    }
-
-    #[test]
-    fn validates_thread_start_rejects_non_object_sandbox_policy() {
-        let err = validate_rpc_request(
-            "thread/start",
-            &json!({"cwd":"/tmp","sandbox":"readOnly"}),
-            RpcValidationMode::KnownMethods,
-        )
-        .expect_err("thread/start must reject non-object sandbox");
+        .expect_err("thread/start must reject non-string sandbox");
         assert!(matches!(err, RpcError::InvalidRequest(_)));
     }
 
     #[test]
-    fn validates_thread_start_rejects_empty_sandbox_policy_type() {
+    fn validates_thread_start_rejects_unknown_sandbox_mode() {
         let err = validate_rpc_request(
             "thread/start",
-            &json!({"cwd":"/tmp","sandbox":{"type":"   "}}),
+            &json!({"cwd":"/tmp","sandbox":"external-sandbox"}),
             RpcValidationMode::KnownMethods,
         )
-        .expect_err("thread/start must reject empty sandbox.type");
+        .expect_err("thread/start must reject unknown sandbox mode");
         assert!(matches!(err, RpcError::InvalidRequest(_)));
     }
 

@@ -45,7 +45,7 @@
 ## 실행 가이드
 - 기본 전체 세트:
   - `cargo test --workspace`
-- opt-in 실서버 세트(7개 ignored 시나리오):
+- opt-in 실서버 세트(9개 ignored 시나리오, release preflight 포함 가능):
   - `COCLAI_REAL_SERVER_APPROVED=1 cargo test -p coclai ergonomic::tests::real_server:: -- --ignored --nocapture`
 - 레이어별 예시:
   - `cargo test -p coclai runtime::api::tests::params_and_types:: -- --nocapture`

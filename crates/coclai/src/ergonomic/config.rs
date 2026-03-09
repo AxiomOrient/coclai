@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::plugin::{PostHook, PreHook};
 use crate::runtime::{
     ApprovalPolicy, ClientConfig, CompatibilityGuard, InitializeCapabilities, PromptAttachment,
-    ReasoningEffort, RunProfile, RuntimeHookConfig, SandboxPolicy, SessionConfig,
+    ReasoningEffort, RunProfile, RuntimeHookConfig, SandboxPolicy, SessionConfig, ShellCommandHook,
 };
 
 use crate::ergonomic::paths::absolutize_cwd_without_fs_checks;
@@ -98,6 +98,14 @@ impl WorkflowConfig {
     /// Register one global runtime post hook (connect-time).
     pub fn with_global_post_hook(mut self, hook: Arc<dyn PostHook>) -> Self {
         self.client_config = self.client_config.with_post_hook(hook);
+        self
+    }
+
+    /// Register one global pre-tool-use hook (fires via the internal approval loop).
+    /// The runtime manages the approval channel and auto-escalates ApprovalPolicy → Untrusted.
+    /// Allocation: amortized O(1) push. Complexity: O(1).
+    pub fn with_global_pre_tool_use_hook(mut self, hook: Arc<dyn PreHook>) -> Self {
+        self.client_config = self.client_config.with_pre_tool_use_hook(hook);
         self
     }
 
@@ -195,6 +203,35 @@ impl WorkflowConfig {
     pub fn with_run_post_hook(mut self, hook: Arc<dyn PostHook>) -> Self {
         self.run_profile = self.run_profile.with_post_hook(hook);
         self
+    }
+
+    /// Register an external shell command as a global pre-hook (connect-time).
+    /// The command is run via `sh -c`. Default timeout: 5 seconds.
+    /// On exit 0 → Noop or Mutate. On exit 2 → Block. On other exit → HookIssue.
+    /// Allocation: two Strings.
+    pub fn with_shell_pre_hook(self, name: &'static str, command: impl Into<String>) -> Self {
+        self.with_global_pre_hook(Arc::new(ShellCommandHook::new(name, command)))
+    }
+
+    /// Register an external shell command as a global post-hook (connect-time).
+    /// The command is run via `sh -c`. Default timeout: 5 seconds.
+    /// On exit 0 → Ok(()). On other exit → HookIssue (non-fatal, logged in report).
+    /// Allocation: two Strings.
+    pub fn with_shell_post_hook(self, name: &'static str, command: impl Into<String>) -> Self {
+        self.with_global_post_hook(Arc::new(ShellCommandHook::new(name, command)))
+    }
+
+    /// Register an external shell command as a global pre-hook with explicit timeout.
+    /// Allocation: two Strings.
+    pub fn with_shell_pre_hook_timeout(
+        self,
+        name: &'static str,
+        command: impl Into<String>,
+        timeout: Duration,
+    ) -> Self {
+        self.with_global_pre_hook(Arc::new(
+            ShellCommandHook::new(name, command).with_timeout(timeout),
+        ))
     }
 
     /// Build session config with the same cwd/profile defaults.

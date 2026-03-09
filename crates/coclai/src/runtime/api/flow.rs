@@ -86,6 +86,8 @@ pub(super) fn build_hook_context(
         correlation_id: correlation_id.to_owned(),
         ts_ms: super::super::now_millis(),
         metadata: metadata.clone(),
+        tool_name: None,
+        tool_input: None,
     }
 }
 
@@ -241,7 +243,7 @@ pub(super) async fn apply_pre_hook_actions_to_prompt(
 ) {
     for decision in decisions {
         match decision.action {
-            HookAction::Noop => {}
+            HookAction::Noop | HookAction::Block(_) => {}
             HookAction::Mutate(patch) => {
                 apply_prompt_patch(
                     state,
@@ -265,7 +267,7 @@ pub(super) fn apply_pre_hook_actions_to_session(
 ) {
     for decision in decisions {
         match decision.action {
-            HookAction::Noop => {}
+            HookAction::Noop | HookAction::Block(_) => {}
             HookAction::Mutate(patch) => {
                 apply_session_patch(state, decision.hook_name.as_str(), phase, patch, report)
             }

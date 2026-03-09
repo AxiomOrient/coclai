@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::plugin::HookPhase;
+use crate::plugin::{BlockReason, HookPhase};
 use serde_json::{Map, Value};
 
 use crate::runtime::core::Runtime;
@@ -105,7 +105,7 @@ impl Runtime {
 
         let (p, mut hook_state, start_cwd, start_model) = self
             .prepare_session_start_hooks(p, None, scoped_hooks)
-            .await;
+            .await?;
         let result = self.thread_start_raw(p).await;
         self.finalize_session_start_hooks(
             &mut hook_state,
@@ -140,7 +140,7 @@ impl Runtime {
 
         let (p, mut hook_state, resume_cwd, resume_model) = self
             .prepare_session_start_hooks(p, Some(thread_id), scoped_hooks)
-            .await;
+            .await?;
         let result = self.thread_resume_raw(thread_id, p).await;
         self.finalize_session_start_hooks(
             &mut hook_state,
@@ -160,12 +160,15 @@ impl Runtime {
         p: ThreadStartParams,
         thread_id: Option<&str>,
         scoped_hooks: Option<&RuntimeHookConfig>,
-    ) -> (
-        ThreadStartParams,
-        HookExecutionState,
-        Option<String>,
-        Option<String>,
-    ) {
+    ) -> Result<
+        (
+            ThreadStartParams,
+            HookExecutionState,
+            Option<String>,
+            Option<String>,
+        ),
+        RpcError,
+    > {
         let mut hook_state = HookExecutionState::new(self.next_hook_correlation_id());
         let mut session_state =
             SessionMutationState::from_thread_start(&p, hook_state.metadata.clone());
@@ -179,7 +182,8 @@ impl Runtime {
                 None,
                 scoped_hooks,
             )
-            .await;
+            .await
+            .map_err(block_reason_to_rpc_error)?;
         apply_pre_hook_actions_to_session(
             &mut session_state,
             HookPhase::PreSessionStart,
@@ -193,7 +197,7 @@ impl Runtime {
         let cwd = p.cwd.clone();
         let model = p.model.clone();
 
-        (p, hook_state, cwd, model)
+        Ok((p, hook_state, cwd, model))
     }
 
     async fn finalize_session_start_hooks(
@@ -230,6 +234,7 @@ impl Runtime {
         thread_id: &str,
         p: ThreadStartParams,
     ) -> Result<ThreadHandle, RpcError> {
+        let p = super::escalate_approval_if_tool_hooks(self, p);
         super::wire::validate_thread_start_security(&p)?;
         let mut params = Map::<String, Value>::new();
         params.insert("threadId".to_owned(), Value::String(thread_id.to_owned()));
@@ -389,4 +394,13 @@ fn ensure_turn_input_not_empty(input: &[InputItem]) -> Result<(), RpcError> {
         ));
     }
     Ok(())
+}
+
+/// Convert a `BlockReason` to `RpcError` for session-start callers.
+/// Allocation: one formatted String.
+fn block_reason_to_rpc_error(r: BlockReason) -> RpcError {
+    RpcError::InvalidRequest(format!(
+        "blocked by hook '{}' at {:?}: {}",
+        r.hook_name, r.phase, r.message
+    ))
 }

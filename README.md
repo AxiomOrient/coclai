@@ -19,7 +19,7 @@ It exposes five layers so you can start simple and reach deeper only when needed
 Published crate:
 ```toml
 [dependencies]
-coclai = "0.2.1"
+coclai = "0.2.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             coclai::rpc_methods::THREAD_START,
             json!({
                 "cwd": "/abs/path/workdir",
-                "sandbox": { "type": "readOnly" }
+                "sandbox": "read-only"
             }),
         )
         .await?;
@@ -182,12 +182,31 @@ let config = WorkflowConfig::new("/abs/path/workdir")
     .with_global_pre_hook(Arc::new(LoggingHook));
 ```
 
-Hook phases: `PreRun`, `PostRun`, `PreSessionStart`, `PostSessionStart`, `PreTurn`, `PostTurn`.
+Hook phases:
+- run/session/turn: `PreRun`, `PostRun`, `PreSessionStart`, `PostSessionStart`, `PreTurn`, `PostTurn`
+- tool loop: `PreToolUse`, `PostToolUse`
+
+Hook actions:
+- `HookAction::Noop`
+- `HookAction::Mutate(HookPatch)`
+- `HookAction::Block(BlockReason)` for pre-hooks
+
+Ergonomic builders:
+- global hooks: `with_global_pre_hook`, `with_global_post_hook`, `with_global_pre_tool_use_hook`
+- run-scoped hooks: `with_run_pre_hook`, `with_run_post_hook`
+- shell adapters: `with_shell_pre_hook`, `with_shell_post_hook`, `with_shell_pre_hook_timeout`
+
+Important contract:
+- pre-tool-use hooks fire on approval-gated tool/file-change requests, not every successful write
+- privileged write sandboxes still require explicit opt-in via `allow_privileged_escalation()`
+- tool-use hooks do not replace sandbox/approval policy; they sit on top of it
 
 ## Documentation
 
 - [API_REFERENCE.md](docs/API_REFERENCE.md): full public API surface, typed payload contracts, validation and security rules
 - [TEST_TREE.md](docs/TEST_TREE.md): test layer structure and live-gate boundary
+- [BACKLOG.md](docs/BACKLOG.md): non-blocking follow-up improvements
+- [CHANGELOG.md](CHANGELOG.md): release history
 
 ## Quality Gates
 
@@ -219,6 +238,7 @@ COCLAI_RELEASE_INCLUDE_REAL_SERVER=1 \
 - Stable non-experimental upstream fields go to typed APIs first.
 - Experimental fields stay raw until the protocol is stable and testable.
 - `requestUserInput` and dynamic tool-call live coverage remain outside the deterministic release boundary.
+- Hook support exists, but live hook coverage is narrower than core prompt/session flows.
 
 ## License
 

@@ -16,16 +16,23 @@ pub struct Session {
     runtime: Runtime,
     pub thread_id: String,
     pub config: SessionConfig,
+    tool_use_loop_started: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
     close_result: Arc<Mutex<Option<Result<(), RpcError>>>>,
 }
 
 impl Session {
-    pub(super) fn new(runtime: Runtime, thread_id: String, config: SessionConfig) -> Self {
+    pub(super) fn new(
+        runtime: Runtime,
+        thread_id: String,
+        config: SessionConfig,
+        tool_use_loop_started: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             runtime,
             thread_id,
             config,
+            tool_use_loop_started,
             closed: Arc::new(AtomicBool::new(false)),
             close_result: Arc::new(Mutex::new(None)),
         }
@@ -42,6 +49,7 @@ impl Session {
     /// Allocation: PromptRunParams clone payloads (cwd/model/sandbox/attachments). Complexity: O(n), n = attachment count + prompt length.
     pub async fn ask(&self, prompt: impl Into<String>) -> Result<PromptRunResult, PromptRunError> {
         ensure_session_open_for_prompt(self.is_closed())?;
+        self.ensure_tool_use_hook_loop(self.config.hooks.has_pre_tool_use_hooks());
         self.runtime
             .run_prompt_on_loaded_thread_with_hooks(
                 &self.thread_id,
@@ -59,6 +67,7 @@ impl Session {
         params: PromptRunParams,
     ) -> Result<PromptRunResult, PromptRunError> {
         ensure_session_open_for_prompt(self.is_closed())?;
+        self.ensure_tool_use_hook_loop(self.config.hooks.has_pre_tool_use_hooks());
         self.runtime
             .run_prompt_on_loaded_thread_with_hooks(
                 &self.thread_id,
@@ -80,6 +89,7 @@ impl Session {
         let (params, profile_hooks) =
             profile_to_prompt_params_with_hooks(self.config.cwd.clone(), prompt, profile);
         let merged_hooks = merge_hook_configs(&self.config.hooks, &profile_hooks);
+        self.ensure_tool_use_hook_loop(merged_hooks.has_pre_tool_use_hooks());
         self.runtime
             .run_prompt_on_loaded_thread_with_hooks(&self.thread_id, params, Some(&merged_hooks))
             .await
@@ -112,6 +122,23 @@ impl Session {
         let result = self.runtime.thread_archive(&self.thread_id).await;
         *guard = Some(result.clone());
         result
+    }
+
+    fn ensure_tool_use_hook_loop(&self, needs_loop: bool) {
+        if !needs_loop {
+            return;
+        }
+        if self
+            .tool_use_loop_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            tokio::spawn(
+                crate::runtime::api::tool_use_hooks::run_tool_use_approval_loop(
+                    self.runtime.clone(),
+                ),
+            );
+        }
     }
 }
 

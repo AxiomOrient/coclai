@@ -1,12 +1,18 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-use crate::plugin::{HookAction, HookContext, HookIssue, HookPhase, HookReport, PostHook, PreHook};
+use crate::plugin::{
+    BlockReason, HookAction, HookContext, HookIssue, HookPhase, HookReport, PostHook, PreHook,
+};
 
 #[derive(Clone, Default)]
 pub struct RuntimeHookConfig {
     pub pre_hooks: Vec<Arc<dyn PreHook>>,
     pub post_hooks: Vec<Arc<dyn PostHook>>,
+    /// Hooks that fire specifically for PreToolUse phase via the internal approval loop.
+    /// When non-empty, the runtime manages the approval channel internally and auto-escalates
+    /// ApprovalPolicy from Never → Untrusted so codex sends approval requests.
+    pub pre_tool_use_hooks: Vec<Arc<dyn PreHook>>,
 }
 
 impl std::fmt::Debug for RuntimeHookConfig {
@@ -14,6 +20,7 @@ impl std::fmt::Debug for RuntimeHookConfig {
         f.debug_struct("RuntimeHookConfig")
             .field("pre_hooks", &hook_names(&self.pre_hooks))
             .field("post_hooks", &hook_names(&self.post_hooks))
+            .field("pre_tool_use_hooks", &hook_names(&self.pre_tool_use_hooks))
             .finish()
     }
 }
@@ -22,6 +29,7 @@ impl PartialEq for RuntimeHookConfig {
     fn eq(&self, other: &Self) -> bool {
         hook_names(&self.pre_hooks) == hook_names(&other.pre_hooks)
             && hook_names(&self.post_hooks) == hook_names(&other.post_hooks)
+            && hook_names(&self.pre_tool_use_hooks) == hook_names(&other.pre_tool_use_hooks)
     }
 }
 
@@ -48,10 +56,25 @@ impl RuntimeHookConfig {
         self
     }
 
-    /// True when at least one hook is configured.
+    /// Register one pre-tool-use hook (fires in PreToolUse phase via the approval loop).
+    /// Allocation: amortized O(1) push. Complexity: O(1).
+    pub fn with_pre_tool_use_hook(mut self, hook: Arc<dyn PreHook>) -> Self {
+        self.pre_tool_use_hooks.push(hook);
+        self
+    }
+
+    /// True when at least one tool-use hook is registered.
+    /// Allocation: none. Complexity: O(1).
+    pub fn has_pre_tool_use_hooks(&self) -> bool {
+        !self.pre_tool_use_hooks.is_empty()
+    }
+
+    /// True when at least one hook of any kind is configured.
     /// Allocation: none. Complexity: O(1).
     pub fn is_empty(&self) -> bool {
-        self.pre_hooks.is_empty() && self.post_hooks.is_empty()
+        self.pre_hooks.is_empty()
+            && self.post_hooks.is_empty()
+            && self.pre_tool_use_hooks.is_empty()
     }
 }
 
@@ -70,12 +93,18 @@ pub(crate) fn merge_hook_configs(
     RuntimeHookConfig {
         pre_hooks: merge_preferred_hooks(&overlay.pre_hooks, &defaults.pre_hooks),
         post_hooks: merge_preferred_hooks(&overlay.post_hooks, &defaults.post_hooks),
+        pre_tool_use_hooks: merge_preferred_hooks(
+            &overlay.pre_tool_use_hooks,
+            &defaults.pre_tool_use_hooks,
+        ),
     }
 }
 
 pub(crate) struct HookKernel {
     pre_hooks: RwLock<Vec<Arc<dyn PreHook>>>,
     post_hooks: RwLock<Vec<Arc<dyn PostHook>>>,
+    pre_tool_use_hooks: RwLock<Vec<Arc<dyn PreHook>>>,
+    thread_scoped_pre_tool_use_hooks: RwLock<HashMap<String, Vec<Arc<dyn PreHook>>>>,
     latest_report: RwLock<HookReport>,
 }
 
@@ -90,23 +119,58 @@ impl HookKernel {
         Self {
             pre_hooks: RwLock::new(config.pre_hooks),
             post_hooks: RwLock::new(config.post_hooks),
+            pre_tool_use_hooks: RwLock::new(config.pre_tool_use_hooks),
+            thread_scoped_pre_tool_use_hooks: RwLock::new(HashMap::new()),
             latest_report: RwLock::new(HookReport::default()),
         }
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
-        let pre_count = match self.pre_hooks.read() {
-            Ok(guard) => guard.len(),
-            Err(poisoned) => poisoned.into_inner().len(),
-        };
-        if pre_count > 0 {
-            return true;
+        rwlock_len(&self.pre_hooks) > 0
+            || rwlock_len(&self.post_hooks) > 0
+            || rwlock_len(&self.pre_tool_use_hooks) > 0
+    }
+
+    /// True when at least one pre-tool-use hook is registered.
+    /// Allocation: none (read lock only). Complexity: O(1).
+    pub(crate) fn has_pre_tool_use_hooks(&self) -> bool {
+        rwlock_len(&self.pre_tool_use_hooks) > 0
+            || match self.thread_scoped_pre_tool_use_hooks.read() {
+                Ok(guard) => guard.values().any(|hooks| !hooks.is_empty()),
+                Err(poisoned) => poisoned
+                    .into_inner()
+                    .values()
+                    .any(|hooks| !hooks.is_empty()),
+            }
+    }
+
+    pub(crate) fn register_thread_scoped_pre_tool_use_hooks(
+        &self,
+        thread_id: &str,
+        hooks: &[Arc<dyn PreHook>],
+    ) {
+        if hooks.is_empty() {
+            return;
         }
-        let post_count = match self.post_hooks.read() {
-            Ok(guard) => guard.len(),
-            Err(poisoned) => poisoned.into_inner().len(),
+        let mut guard = match self.thread_scoped_pre_tool_use_hooks.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         };
-        post_count > 0
+        let entry = guard.entry(thread_id.to_owned()).or_default();
+        let mut names: HashSet<&'static str> = entry.iter().map(|hook| hook.hook_name()).collect();
+        for hook in hooks {
+            if names.insert(hook.hook_name()) {
+                entry.push(Arc::clone(hook));
+            }
+        }
+    }
+
+    pub(crate) fn clear_thread_scoped_pre_tool_use_hooks(&self, thread_id: &str) {
+        let mut guard = match self.thread_scoped_pre_tool_use_hooks.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.remove(thread_id);
     }
 
     /// Register additional hooks into runtime kernel.
@@ -118,6 +182,7 @@ impl HookKernel {
         }
         register_dedup_hooks(&self.pre_hooks, config.pre_hooks);
         register_dedup_hooks(&self.post_hooks, config.post_hooks);
+        register_dedup_hooks(&self.pre_tool_use_hooks, config.pre_tool_use_hooks);
     }
 
     pub(crate) fn report_snapshot(&self) -> HookReport {
@@ -136,12 +201,14 @@ impl HookKernel {
 
     /// Execute global pre hooks plus optional scoped hooks for one call.
     /// Scoped hooks are appended after globals and deduplicated by hook name.
+    /// Returns `Err(BlockReason)` on the first hook that returns `HookAction::Block`.
+    /// Subsequent hooks are not executed. Allocation: O(n) decisions vec.
     pub(crate) async fn run_pre_with(
         &self,
         ctx: &HookContext,
         report: &mut HookReport,
         scoped: Option<&RuntimeHookConfig>,
-    ) -> Vec<PreHookDecision> {
+    ) -> Result<Vec<PreHookDecision>, BlockReason> {
         let hooks = merge_owned_with_overlay(
             read_rwlock_vec(&self.pre_hooks),
             scoped.map(|cfg| cfg.pre_hooks.as_slice()),
@@ -149,6 +216,7 @@ impl HookKernel {
         let mut decisions = Vec::with_capacity(hooks.len());
         for hook in hooks {
             match hook.call(ctx).await {
+                Ok(HookAction::Block(reason)) => return Err(reason),
                 Ok(action) => decisions.push(PreHookDecision {
                     hook_name: hook.name().to_owned(),
                     action,
@@ -156,7 +224,42 @@ impl HookKernel {
                 Err(issue) => report.push(normalize_issue(issue, hook.name(), ctx.phase)),
             }
         }
-        decisions
+        Ok(decisions)
+    }
+
+    /// Execute pre-tool-use hooks for one approval request.
+    /// Returns `Err(BlockReason)` on the first hook that blocks (→ deny approval).
+    /// Returns `Ok(())` when all hooks pass (→ approve).
+    /// Allocation: O(n) hook vec clone. Complexity: O(n), n = hook count.
+    pub(crate) async fn run_pre_tool_use_with(
+        &self,
+        ctx: &HookContext,
+        report: &mut HookReport,
+    ) -> Result<(), BlockReason> {
+        let mut hooks = read_rwlock_vec(&self.pre_tool_use_hooks);
+        if let Some(thread_id) = ctx.thread_id.as_deref() {
+            let scoped = self.thread_scoped_pre_tool_use_hooks_for(thread_id);
+            hooks = merge_owned_with_overlay(hooks, scoped.as_deref());
+        }
+        for hook in hooks {
+            match hook.call(ctx).await {
+                Ok(HookAction::Block(reason)) => return Err(reason),
+                Ok(_) => {}
+                Err(issue) => report.push(normalize_issue(issue, hook.name(), ctx.phase)),
+            }
+        }
+        Ok(())
+    }
+
+    fn thread_scoped_pre_tool_use_hooks_for(
+        &self,
+        thread_id: &str,
+    ) -> Option<Vec<Arc<dyn PreHook>>> {
+        let guard = match self.thread_scoped_pre_tool_use_hooks.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.get(thread_id).cloned()
     }
 
     /// Execute global post hooks plus optional scoped hooks for one call.
@@ -207,6 +310,15 @@ impl HookName for dyn PreHook {
 impl HookName for dyn PostHook {
     fn hook_name(&self) -> &'static str {
         self.name()
+    }
+}
+
+/// Read the length of a poisoning-safe RwLock hook vec without cloning.
+/// Allocation: none. Complexity: O(1).
+fn rwlock_len<T: ?Sized>(target: &RwLock<Vec<Arc<T>>>) -> usize {
+    match target.read() {
+        Ok(guard) => guard.len(),
+        Err(poisoned) => poisoned.into_inner().len(),
     }
 }
 

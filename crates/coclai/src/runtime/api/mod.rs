@@ -9,6 +9,7 @@ mod flow;
 mod models;
 mod prompt_run;
 mod thread_api;
+pub(crate) mod tool_use_hooks;
 mod turn_error;
 mod wire;
 
@@ -37,7 +38,8 @@ pub use models::{
     PromptRunError, PromptRunParams, PromptRunResult, PromptTurnFailure, PromptTurnTerminalState,
 };
 pub(crate) use types::{
-    sandbox_policy_to_wire_value, summarize_sandbox_policy, summarize_sandbox_policy_wire_value,
+    normalize_sandbox_mode_alias, sandbox_mode_to_wire_value, sandbox_policy_to_wire_value,
+    summarize_sandbox_policy, summarize_sandbox_policy_wire_value,
 };
 pub use types::{
     ApprovalPolicy, ByteRange, CommandExecOutputDeltaNotification, CommandExecOutputStream,
@@ -58,8 +60,9 @@ pub use types::{
 impl Runtime {
     pub(crate) async fn thread_start_raw(
         &self,
-        p: ThreadStartParams,
+        mut p: ThreadStartParams,
     ) -> Result<ThreadHandle, RpcError> {
+        p = escalate_approval_if_tool_hooks(self, p);
         validate_thread_start_security(&p)?;
         let response = self
             .call_validated(methods::THREAD_START, thread_start_params_to_wire(&p))
@@ -74,6 +77,21 @@ impl Runtime {
             runtime: self.clone(),
         })
     }
+}
+
+/// If the runtime has pre-tool-use hooks, escalate approval policy from Never → Untrusted
+/// so that codex sends approval requests that the hook loop can intercept.
+/// Pure transform; no I/O. Allocation: none. Complexity: O(1).
+fn escalate_approval_if_tool_hooks(
+    runtime: &Runtime,
+    mut p: ThreadStartParams,
+) -> ThreadStartParams {
+    if runtime.has_pre_tool_use_hooks()
+        && matches!(p.approval_policy, None | Some(ApprovalPolicy::Never))
+    {
+        p.approval_policy = Some(ApprovalPolicy::Untrusted);
+    }
+    p
 }
 
 #[cfg(test)]

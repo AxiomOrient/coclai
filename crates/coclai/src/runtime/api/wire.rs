@@ -5,9 +5,9 @@ use crate::runtime::errors::RpcError;
 use crate::runtime::rpc_contract::payload_summary;
 
 use super::{
-    sandbox_policy_to_wire_value, summarize_sandbox_policy, ApprovalPolicy, ByteRange,
-    CommandExecParams, InputItem, PromptAttachment, TextElement, ThreadStartParams,
-    TurnStartParams,
+    sandbox_mode_to_wire_value, sandbox_policy_to_wire_value, summarize_sandbox_policy,
+    ApprovalPolicy, ByteRange, CommandExecParams, InputItem, PromptAttachment, TextElement,
+    ThreadStartParams, TurnStartParams,
 };
 
 pub(super) fn serialize_params<T: Serialize>(method: &str, params: &T) -> Result<Value, RpcError> {
@@ -162,7 +162,7 @@ fn insert_thread_common_overrides(params: &mut Map<String, Value>, p: &ThreadSta
     if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
         params.insert(
             "sandbox".to_owned(),
-            sandbox_policy_to_wire_value(sandbox_policy),
+            sandbox_mode_to_wire_value(sandbox_policy),
         );
     }
     if let Some(config) = p.config.as_ref() {

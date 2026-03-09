@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::plugin::{BlockReason, HookPhase};
 use crate::runtime::errors::{RpcError, RuntimeError};
 
 use super::{
@@ -208,4 +209,23 @@ pub enum PromptRunError {
     EmptyAssistantText,
     #[error("attachment not found: {0}")]
     AttachmentNotFound(String),
+    /// A pre-hook explicitly blocked execution before any RPC was sent.
+    #[error("blocked by hook '{hook_name}' at {phase:?}: {message}")]
+    BlockedByHook {
+        hook_name: String,
+        phase: HookPhase,
+        message: String,
+    },
+}
+
+impl PromptRunError {
+    /// Convert a raw [`BlockReason`] into [`PromptRunError::BlockedByHook`].
+    /// Allocation: clones two Strings.
+    pub(crate) fn from_block(r: BlockReason) -> Self {
+        Self::BlockedByHook {
+            hook_name: r.hook_name,
+            phase: r.phase,
+            message: r.message,
+        }
+    }
 }

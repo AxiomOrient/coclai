@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::plugin::HookPhase;
+use crate::plugin::{BlockReason, HookPhase};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::runtime::core::Runtime;
@@ -129,7 +129,7 @@ impl Runtime {
         let fallback_thread_id = target.hook_thread_id();
         let (p, mut hook_state, run_cwd, run_model) = self
             .prepare_prompt_pre_run_hooks(p, fallback_thread_id, scoped_hooks)
-            .await;
+            .await?;
         let result = self
             .run_prompt_target_entry_dispatch(target, p, Some(&mut hook_state), scoped_hooks)
             .await;
@@ -169,8 +169,14 @@ impl Runtime {
         &self,
         thread_id: Option<&str>,
         p: &PromptRunParams,
+        scoped_hooks: Option<&RuntimeHookConfig>,
     ) -> Result<ThreadHandle, RpcError> {
-        let start = thread_start_params_from_prompt(p);
+        let mut start = thread_start_params_from_prompt(p);
+        if self.has_pre_tool_use_hooks_with(scoped_hooks)
+            && matches!(start.approval_policy, None | Some(ApprovalPolicy::Never))
+        {
+            start.approval_policy = Some(ApprovalPolicy::Untrusted);
+        }
         match thread_id {
             Some(existing_thread_id) => self.thread_resume_raw(existing_thread_id, start).await,
             None => self.thread_start_raw(start).await,
@@ -186,7 +192,7 @@ impl Runtime {
     ) -> Result<PromptRunResult, PromptRunError> {
         validate_prompt_attachments(&p.cwd, &p.attachments).await?;
         let effort = p.effort.unwrap_or(DEFAULT_REASONING_EFFORT);
-        let thread = self.open_prompt_thread(thread_id, &p).await?;
+        let thread = self.open_prompt_thread(thread_id, &p, scoped_hooks).await?;
         self.run_prompt_on_thread(thread, p, effort, hook_state, scoped_hooks)
             .await
     }
@@ -210,20 +216,21 @@ impl Runtime {
         mut p: PromptRunParams,
         thread_id: Option<&str>,
         scoped_hooks: Option<&RuntimeHookConfig>,
-    ) -> (PromptRunParams, HookExecutionState, String, Option<String>) {
+    ) -> Result<(PromptRunParams, HookExecutionState, String, Option<String>), PromptRunError> {
         let mut hook_state = HookExecutionState::new(self.next_hook_correlation_id());
         let mut prompt_state = PromptMutationState::from_params(&p, hook_state.metadata.clone());
         let decisions = self
             .execute_pre_hook_phase(
                 &mut hook_state,
                 HookPhase::PreRun,
-                Some(prompt_state.prompt.as_str()),
+                Some(p.cwd.as_str()),
                 prompt_state.model.as_deref(),
                 thread_id,
                 None,
                 scoped_hooks,
             )
-            .await;
+            .await
+            .map_err(PromptRunError::from_block)?;
         apply_pre_hook_actions_to_prompt(
             &mut prompt_state,
             p.cwd.as_str(),
@@ -238,7 +245,7 @@ impl Runtime {
         p.attachments = prompt_state.attachments;
         let run_cwd = p.cwd.clone();
         let run_model = p.model.clone();
-        (p, hook_state, run_cwd, run_model)
+        Ok((p, hook_state, run_cwd, run_model))
     }
 
     async fn finalize_prompt_run_hooks(
@@ -286,13 +293,14 @@ impl Runtime {
                 .execute_pre_hook_phase(
                     state,
                     HookPhase::PreTurn,
-                    Some(prompt_state.prompt.as_str()),
+                    Some(p.cwd.as_str()),
                     prompt_state.model.as_deref(),
                     Some(thread.thread_id.as_str()),
                     None,
                     scoped_hooks,
                 )
-                .await;
+                .await
+                .map_err(PromptRunError::from_block)?;
             apply_pre_hook_actions_to_prompt(
                 &mut prompt_state,
                 p.cwd.as_str(),
@@ -307,6 +315,7 @@ impl Runtime {
             p.attachments = prompt_state.attachments;
         }
 
+        self.register_thread_scoped_pre_tool_use_hooks(&thread.thread_id, scoped_hooks);
         let live_rx = self.subscribe_live();
         let mut post_turn_id: Option<String> = None;
         let run_result = match thread
@@ -343,6 +352,7 @@ impl Runtime {
             .await;
         }
 
+        self.clear_thread_scoped_pre_tool_use_hooks(&thread.thread_id);
         run_result
     }
 
@@ -527,7 +537,7 @@ impl Runtime {
         thread_id: Option<&str>,
         turn_id: Option<&str>,
         scoped_hooks: Option<&RuntimeHookConfig>,
-    ) -> Vec<PreHookDecision> {
+    ) -> Result<Vec<PreHookDecision>, BlockReason> {
         let ctx = build_hook_context(
             hook_state.correlation_id.as_str(),
             &hook_state.metadata,

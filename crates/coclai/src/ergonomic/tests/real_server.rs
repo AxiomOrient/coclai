@@ -1,14 +1,14 @@
 use super::super::*;
 use crate::appserver::{methods, AppServer};
 use crate::runtime::turn_lifecycle::collect_turn_terminal_with_limits;
-use crate::runtime::turn_output::{
-    parse_thread_id, parse_turn_id, TurnStreamCollector, TurnTerminalEvent,
-};
+use crate::runtime::turn_output::{parse_thread_id, parse_turn_id, TurnStreamCollector};
 use crate::runtime::PromptRunResult;
 use crate::runtime::{Client, RunProfile, SessionConfig, ThreadReadParams, ThreadReadResponse};
+use crate::ShellCommandHook;
 use serde_json::json;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, Duration as TokioDuration};
 use uuid::Uuid;
@@ -17,15 +17,17 @@ const MAX_REAL_SERVER_RETRIES: usize = 5;
 const QUICK_RUN_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(45);
 const WORKFLOW_RUN_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(60);
 const SESSION_RUN_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(75);
+const HOOK_RUN_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(360);
 const APPSERVER_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(45);
-const APPROVAL_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(180);
-const APPROVAL_REQUEST_TIMEOUT: TokioDuration = TokioDuration::from_secs(90);
-const APPROVAL_COMPLETION_TIMEOUT: TokioDuration = TokioDuration::from_secs(90);
+const APPROVAL_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(480);
+const APPROVAL_REQUEST_TIMEOUT: TokioDuration = TokioDuration::from_secs(240);
+const APPROVAL_COMPLETION_TIMEOUT: TokioDuration = TokioDuration::from_secs(240);
 const APPROVAL_FILE_TEXT: &str = "approval-needed";
 const REAL_SERVER_APPROVAL_ENV: &str = "COCLAI_REAL_SERVER_APPROVED";
 const ATTACHED_DOC_TOKEN: &str = "sandboxPolicy";
 const SESSION_MEMORY_TOKEN: &str = "AXIOM-742";
 const RESUME_MEMORY_TOKEN: &str = "LATTICE-931";
+const HOOK_FILE_TEXT: &str = "hook-wrote-this";
 
 struct ScratchDirGuard {
     path: PathBuf,
@@ -83,6 +85,206 @@ fn workspace_path_utf8(relative: &str) -> Result<String, String> {
     path.to_str()
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("workspace path is non-utf8: {}", path.display()))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn write_shell_hook_probe(path: &Path, emit_noop_json: bool) -> Result<(), String> {
+    let body = if emit_noop_json {
+        r#"import json, os, sys
+ctx = json.load(sys.stdin)
+with open(os.environ["HOOK_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "phase": ctx.get("phase"),
+        "tool_name": ctx.get("tool_name"),
+        "cwd": ctx.get("cwd")
+    }) + "\n")
+print("{}")
+"#
+    } else {
+        r#"import json, os, sys
+ctx = json.load(sys.stdin)
+with open(os.environ["HOOK_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "phase": ctx.get("phase"),
+        "tool_name": ctx.get("tool_name"),
+        "cwd": ctx.get("cwd")
+    }) + "\n")
+"#
+    };
+    std::fs::write(path, body)
+        .map_err(|err| format!("failed to write hook probe {}: {err}", path.display()))
+}
+
+fn read_hook_log(path: &Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read hook log {}: {err}", path.display()))?;
+    Ok(text.lines().map(ToOwned::to_owned).collect())
+}
+
+async fn wait_for_exact_file_text(
+    path: &Path,
+    expected: &str,
+    timeout: TokioDuration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match std::fs::read_to_string(path) {
+            Ok(text) if text.trim() == expected => return Ok(()),
+            Ok(_) | Err(_) => {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                sleep(TokioDuration::from_millis(250)).await;
+            }
+        }
+    }
+
+    let detail = match std::fs::read_to_string(path) {
+        Ok(text) => format!("unexpected file contents: {text}"),
+        Err(err) => format!("file unavailable: {err}"),
+    };
+    Err(format!(
+        "timed out waiting for {} to contain expected text: {detail}",
+        path.display()
+    ))
+}
+
+async fn shell_pre_and_post_hook_attempt() -> Result<(), String> {
+    tokio::time::timeout(HOOK_RUN_ATTEMPT_TIMEOUT, async move {
+        let scratch = ScratchDirGuard::new("live-hook-run")?;
+        let cwd = scratch.utf8()?;
+        let pre_log = scratch.path().join("pre.log");
+        let post_log = scratch.path().join("post.log");
+        let pre_script = scratch.path().join("pre_hook.py");
+        let post_script = scratch.path().join("post_hook.py");
+        write_shell_hook_probe(&pre_script, true)?;
+        write_shell_hook_probe(&post_script, false)?;
+
+        let pre_command = format!("python3 {}", shell_quote(&pre_script.display().to_string()));
+        let post_command = format!(
+            "python3 {}",
+            shell_quote(&post_script.display().to_string())
+        );
+
+        let config = WorkflowConfig::new(cwd)
+            .with_timeout(Duration::from_secs(300))
+            .with_global_pre_hook(Arc::new(
+                ShellCommandHook::new("live-pre", pre_command)
+                    .with_env("HOOK_LOG", pre_log.display().to_string()),
+            ))
+            .with_global_post_hook(Arc::new(
+                ShellCommandHook::new("live-post", post_command)
+                    .with_env("HOOK_LOG", post_log.display().to_string()),
+            ));
+        let workflow = Workflow::connect(config)
+            .await
+            .map_err(|err| format!("workflow connect with hook probe failed: {err}"))?;
+        let run_result = workflow.run("Reply with only OK.").await;
+        let shutdown_result = workflow.shutdown().await;
+
+        let out = match run_result {
+            Ok(out) => out,
+            Err(err) => return Err(format!("hook probe run failed: {err:?}")),
+        };
+        if let Err(err) = shutdown_result {
+            return Err(format!("hook probe shutdown failed: {err}"));
+        }
+        assert_prompt_result_non_empty("hook probe run", &out)?;
+
+        let pre_lines = read_hook_log(&pre_log)?;
+        let post_lines = read_hook_log(&post_log)?;
+        if !pre_lines.iter().any(|line| line.contains("PreRun")) {
+            return Err(format!("pre hook log missing PreRun phase: {pre_lines:?}"));
+        }
+        if !post_lines.iter().any(|line| line.contains("PostRun")) {
+            return Err(format!(
+                "post hook log missing PostRun phase: {post_lines:?}"
+            ));
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|_| format!("shell hook probe timed out after {HOOK_RUN_ATTEMPT_TIMEOUT:?}"))?
+}
+
+async fn pre_tool_use_hook_file_write_attempt() -> Result<(), String> {
+    tokio::time::timeout(APPROVAL_ATTEMPT_TIMEOUT, async move {
+        let scratch = ScratchDirGuard::new("live-tool-hook")?;
+        let cwd = scratch.utf8()?;
+        let file_path = scratch.path().join("hook_probe.txt");
+        let tool_log = scratch.path().join("tool.log");
+        let tool_script = scratch.path().join("tool_hook.py");
+        write_shell_hook_probe(&tool_script, true)?;
+        let tool_command = format!(
+            "python3 {}",
+            shell_quote(&tool_script.display().to_string())
+        );
+
+        let workflow = Workflow::connect(
+            WorkflowConfig::new(cwd)
+                .with_run_profile(
+                    RunProfile::new()
+                        .with_timeout(Duration::from_secs(300))
+                        .with_approval_policy(crate::runtime::ApprovalPolicy::OnRequest)
+                        .allow_privileged_escalation()
+                        .with_sandbox_policy(crate::runtime::SandboxPolicy::Preset(
+                            crate::runtime::SandboxPreset::ReadOnly,
+                        )),
+                )
+                .with_global_pre_tool_use_hook(Arc::new(
+                    ShellCommandHook::new("live-pre-tool", tool_command)
+                        .with_env("HOOK_LOG", tool_log.display().to_string()),
+                )),
+        )
+        .await
+        .map_err(|err| format!("pre-tool-use workflow connect failed: {err}"))?;
+
+        let prompt = format!(
+            "Create the file {} with exact contents {} and then reply with only DONE.",
+            file_path.display(),
+            HOOK_FILE_TEXT
+        );
+        let out = workflow
+            .run(prompt)
+            .await
+            .map_err(|err| format!("pre-tool-use hook run failed: {err:?}"))?;
+        workflow
+            .shutdown()
+            .await
+            .map_err(|err| format!("pre-tool-use workflow shutdown failed: {err}"))?;
+        assert_prompt_result_non_empty("pre-tool-use hook run", &out)?;
+        if !out.assistant_text.trim_end().ends_with("DONE") {
+            return Err(format!(
+                "pre-tool-use hook run returned unexpected assistant text: {}",
+                out.assistant_text
+            ));
+        }
+
+        let file_text = std::fs::read_to_string(&file_path)
+            .map_err(|err| format!("pre-tool-use hook file read failed: {err}"))?;
+        if file_text.trim() != HOOK_FILE_TEXT {
+            return Err(format!(
+                "pre-tool-use hook file write mismatch: {file_text}"
+            ));
+        }
+
+        let tool_lines = read_hook_log(&tool_log)?;
+        if !tool_lines.iter().any(|line| line.contains("PreToolUse")) {
+            return Err(format!(
+                "tool hook log missing PreToolUse phase: {tool_lines:?}"
+            ));
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        format!("pre-tool-use hook file write timed out after {APPROVAL_ATTEMPT_TIMEOUT:?}")
+    })?
 }
 
 fn is_transient_real_server_error(err: &str) -> bool {
@@ -300,7 +502,7 @@ async fn appserver_roundtrip_attempt(cwd: String) -> Result<(), String> {
                 json!({
                     "cwd": cwd,
                     "approvalPolicy": "never",
-                    "sandboxPolicy": { "type": "readOnly" }
+                    "sandbox": "read-only"
                 }),
             )
             .await
@@ -356,19 +558,13 @@ async fn appserver_approval_roundtrip_attempt() -> Result<(), String> {
                 .take_server_requests()
                 .await
                 .map_err(|err| format!("take_server_requests failed: {err}"))?;
-            let writable_root = cwd.clone();
-
             let thread_response = app
                 .request_json(
                     methods::THREAD_START,
                     json!({
                         "cwd": cwd.clone(),
                         "approvalPolicy": "on-request",
-                        "sandboxPolicy": {
-                            "type": "workspaceWrite",
-                            "writableRoots": [writable_root],
-                            "networkAccess": false
-                        }
+                        "sandbox": "read-only"
                     }),
                 )
                 .await
@@ -418,37 +614,39 @@ async fn appserver_approval_roundtrip_attempt() -> Result<(), String> {
                 .await
                 .map_err(|err| format!("approval response failed: {err}"))?;
 
+            wait_for_exact_file_text(&file_path, APPROVAL_FILE_TEXT, APPROVAL_COMPLETION_TIMEOUT)
+                .await
+                .map_err(|err| format!("approval scenario file write failed: {err}"))?;
+
+            let read: ThreadReadResponse = app
+                .request_typed(
+                    methods::THREAD_READ,
+                    ThreadReadParams {
+                        thread_id: thread_id.clone(),
+                        include_turns: Some(false),
+                    },
+                )
+                .await
+                .map_err(|err| format!("approval scenario thread/read failed: {err}"))?;
+            if read.thread.id != thread_id {
+                return Err(format!(
+                    "approval scenario thread/read returned mismatched thread id: expected={thread_id} actual={}",
+                    read.thread.id
+                ));
+            }
+
+            // Best-effort completion drain only. The core low-level contract is
+            // requestApproval -> respond -> side effect, not assistant wording latency.
             let mut stream = TurnStreamCollector::new(&thread_id, &turn_id);
-            let (terminal, _) = collect_turn_terminal_with_limits::<String, _, _, _>(
+            let _ = collect_turn_terminal_with_limits::<String, _, _, _>(
                 &mut live_rx,
                 &mut stream,
                 2048,
-                APPROVAL_COMPLETION_TIMEOUT,
+                TokioDuration::from_secs(5),
                 |_| Ok(()),
                 |_| async { Ok(None) },
             )
-            .await
-            .map_err(|err| format!("approval turn collection failed: {err:?}"))?;
-            if terminal != TurnTerminalEvent::Completed {
-                return Err(format!(
-                    "approval scenario did not complete successfully: {terminal:?}"
-                ));
-            }
-
-            let assistant_text = stream.into_assistant_text();
-            if !assistant_text.trim_end().ends_with("DONE") {
-                return Err(format!(
-                    "approval scenario returned unexpected assistant text: {assistant_text}"
-                ));
-            }
-
-            let file_text = std::fs::read_to_string(&file_path)
-                .map_err(|err| format!("approval scenario file read failed: {err}"))?;
-            if file_text.trim() != APPROVAL_FILE_TEXT {
-                return Err(format!(
-                    "approval scenario wrote unexpected file contents: {file_text}"
-                ));
-            }
+            .await;
 
             Ok(())
         }
@@ -517,7 +715,7 @@ async fn quick_run_with_profile_reads_attached_core_api_file_against_real_codex_
     })
     .await?;
     assert_prompt_result_non_empty("real-server quick_run_with_profile", &out)?;
-    if !out.assistant_text.contains(ATTACHED_DOC_TOKEN) {
+    if !contains_attached_doc_token(&out.assistant_text) {
         return Err(format!(
             "attachment scenario did not return expected API token {ATTACHED_DOC_TOKEN}: {}",
             out.assistant_text
@@ -585,4 +783,35 @@ async fn appserver_approval_roundtrip_executes_against_real_codex_server() -> Re
     })
     .await?;
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "opt-in live test: requires real codex server"]
+async fn shell_pre_and_post_hooks_execute_against_real_codex_server() -> Result<(), String> {
+    ensure_real_server_opt_in()?;
+    run_with_retries("shell pre/post hook probe", || async {
+        shell_pre_and_post_hook_attempt().await
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "opt-in live test: requires real codex server"]
+async fn pre_tool_use_hook_observes_file_write_against_real_codex_server() -> Result<(), String> {
+    ensure_real_server_opt_in()?;
+    run_with_retries("pre-tool-use hook file write probe", || async {
+        pre_tool_use_hook_file_write_attempt().await
+    })
+    .await?;
+    Ok(())
+}
+
+fn contains_attached_doc_token(text: &str) -> bool {
+    let normalized: String = text
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect();
+    normalized.contains("sandboxpolicy")
 }

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use crate::plugin::{HookContext, HookReport};
+use crate::plugin::{BlockReason, HookContext, HookReport};
 use arc_swap::ArcSwapOption;
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
@@ -243,6 +243,50 @@ impl Runtime {
         self.inner.hooks.is_enabled()
     }
 
+    /// True when at least one pre-tool-use hook is registered.
+    /// Allocation: one Vec clone. Complexity: O(n), n = hook count.
+    pub(crate) fn has_pre_tool_use_hooks(&self) -> bool {
+        self.inner.hooks.has_pre_tool_use_hooks()
+    }
+
+    pub(crate) fn has_pre_tool_use_hooks_with(
+        &self,
+        scoped_hooks: Option<&RuntimeHookConfig>,
+    ) -> bool {
+        self.has_pre_tool_use_hooks()
+            || scoped_hooks.is_some_and(|hooks| hooks.has_pre_tool_use_hooks())
+    }
+
+    pub(crate) fn register_thread_scoped_pre_tool_use_hooks(
+        &self,
+        thread_id: &str,
+        scoped_hooks: Option<&RuntimeHookConfig>,
+    ) {
+        let Some(scoped_hooks) = scoped_hooks else {
+            return;
+        };
+        self.inner
+            .hooks
+            .register_thread_scoped_pre_tool_use_hooks(thread_id, &scoped_hooks.pre_tool_use_hooks);
+    }
+
+    pub(crate) fn clear_thread_scoped_pre_tool_use_hooks(&self, thread_id: &str) {
+        self.inner
+            .hooks
+            .clear_thread_scoped_pre_tool_use_hooks(thread_id);
+    }
+
+    /// Run pre-tool-use hooks for one approval context.
+    /// Returns `Err(BlockReason)` to deny, `Ok(())` to approve.
+    /// Allocation: O(n) hook vec clone. Complexity: O(n), n = hook count.
+    pub(crate) async fn run_pre_tool_use_hooks(
+        &self,
+        ctx: &HookContext,
+        report: &mut HookReport,
+    ) -> Result<(), BlockReason> {
+        self.inner.hooks.run_pre_tool_use_with(ctx, report).await
+    }
+
     pub(crate) fn hooks_enabled_with(&self, scoped_hooks: Option<&RuntimeHookConfig>) -> bool {
         self.hooks_enabled() || scoped_hooks.is_some_and(|hooks| !hooks.is_empty())
     }
@@ -256,12 +300,14 @@ impl Runtime {
         self.inner.hooks.set_latest_report(report);
     }
 
+    /// Run pre-hooks. Returns `Err(BlockReason)` if any hook blocks.
+    /// Allocation: O(n) decisions vec, n = hook count.
     pub(crate) async fn run_pre_hooks_with(
         &self,
         ctx: &HookContext,
         report: &mut HookReport,
         scoped_hooks: Option<&RuntimeHookConfig>,
-    ) -> Vec<PreHookDecision> {
+    ) -> Result<Vec<PreHookDecision>, BlockReason> {
         self.inner
             .hooks
             .run_pre_with(ctx, report, scoped_hooks)

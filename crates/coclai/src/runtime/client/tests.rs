@@ -278,6 +278,140 @@ for line in sys.stdin:
     path
 }
 
+fn write_pre_tool_use_approval_cli_script(root: &std::path::Path) -> PathBuf {
+    let path = root.join("mock_codex_cli_pre_tool_use.py");
+    let target_path = serde_json::to_string(
+        &root
+            .join("pre_tool_use_target.txt")
+            .to_string_lossy()
+            .to_string(),
+    )
+    .expect("serialize target path");
+    let script = r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+target_path = pathlib.Path(__TARGET_PATH__)
+pending_turn_rpc_id = None
+pending_thread_id = "thr_pre_tool"
+pending_turn_id = "turn_pre_tool"
+approval_rpc_id = "approval_pre_tool"
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    rpc_id = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    result = msg.get("result") or {}
+
+    if method == "initialize" and rpc_id is not None:
+        sys.stdout.write(json.dumps({
+            "id": rpc_id,
+            "result": {"ready": True, "userAgent": "Codex Desktop/0.104.0"}
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if rpc_id == approval_rpc_id and method is None:
+        if isinstance(result, dict) and result.get("decision") == "accept":
+            target_path.write_text("created-by-approved-tool", encoding="utf-8")
+            sys.stdout.write(json.dumps({
+                "method":"turn/started",
+                "params":{"threadId": pending_thread_id, "turnId": pending_turn_id}
+            }) + "\n")
+            sys.stdout.write(json.dumps({
+                "method":"item/started",
+                "params":{
+                    "threadId": pending_thread_id,
+                    "turnId": pending_turn_id,
+                    "itemId":"item_pre_tool",
+                    "itemType":"agentMessage"
+                }
+            }) + "\n")
+            sys.stdout.write(json.dumps({
+                "method":"item/agentMessage/delta",
+                "params":{
+                    "threadId": pending_thread_id,
+                    "turnId": pending_turn_id,
+                    "itemId":"item_pre_tool",
+                    "delta":"tool approved"
+                }
+            }) + "\n")
+            sys.stdout.write(json.dumps({
+                "method":"turn/completed",
+                "params":{"threadId": pending_thread_id, "turnId": pending_turn_id}
+            }) + "\n")
+            sys.stdout.write(json.dumps({
+                "id": pending_turn_rpc_id,
+                "result": {"turn": {"id": pending_turn_id}}
+            }) + "\n")
+            sys.stdout.flush()
+        else:
+            sys.stdout.write(json.dumps({
+                "id": pending_turn_rpc_id,
+                "error": {"code": -32003, "message": "approval declined"}
+            }) + "\n")
+            sys.stdout.flush()
+        continue
+
+    if rpc_id is None:
+        continue
+
+    if method == "thread/start":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": pending_thread_id}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/resume":
+        pending_thread_id = params.get("threadId") or pending_thread_id
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": pending_thread_id}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "turn/start":
+        pending_turn_rpc_id = rpc_id
+        pending_thread_id = params.get("threadId") or pending_thread_id
+        sys.stdout.write(json.dumps({
+            "id": approval_rpc_id,
+            "method": "item/fileChange/requestApproval",
+            "params": {"threadId": pending_thread_id, "path": str(target_path)}
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/archive":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "turn/interrupt":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+    sys.stdout.flush()
+"#
+    .replace("__TARGET_PATH__", &target_path);
+    fs::write(&path, script).expect("write pre-tool-use cli");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("set script executable");
+    }
+    path
+}
+
 fn temp_cwd(temp: &TempDir) -> String {
     temp.root.to_string_lossy().to_string()
 }
@@ -309,6 +443,19 @@ async fn connect_resume_sensitive_client(
     let client = super::Client::connect(ClientConfig::new().with_cli_bin(cli))
         .await
         .expect("client connect");
+    (temp, client)
+}
+
+async fn connect_pre_tool_use_probe_client(prefix: &str) -> (TempDir, super::Client) {
+    let temp = TempDir::new(prefix);
+    let cli = write_pre_tool_use_approval_cli_script(&temp.root);
+    let client = super::Client::connect(
+        ClientConfig::new()
+            .with_cli_bin(cli)
+            .with_hooks(RuntimeHookConfig::default()),
+    )
+    .await
+    .expect("client connect");
     (temp, client)
 }
 
@@ -934,5 +1081,62 @@ async fn session_hooks_do_not_leak_to_other_sessions() {
         "session hooks leaked into later session operations",
     );
 
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_profile_pre_tool_use_hook_approves_file_change_requests() {
+    let phases = Arc::new(Mutex::new(Vec::<HookPhase>::new()));
+    let (temp, client) =
+        connect_pre_tool_use_probe_client("runtime_client_pre_tool_use_run_profile").await;
+
+    let profile = RunProfile::new()
+        .with_approval_policy(ApprovalPolicy::OnRequest)
+        .with_pre_tool_use_hook(Arc::new(RecordingPreHook {
+            name: "profile_pre_tool",
+            phases: Arc::clone(&phases),
+        }));
+
+    let out = client
+        .run_with_profile(temp_cwd(&temp), "create file", profile)
+        .await
+        .expect("run with pre-tool-use hook");
+    assert_eq!(out.assistant_text, "tool approved");
+    assert!(seen_phase(&phases, HookPhase::PreToolUse));
+    assert_eq!(
+        fs::read_to_string(temp.root.join("pre_tool_use_target.txt")).expect("read target"),
+        "created-by-approved-tool"
+    );
+
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_scoped_pre_tool_use_hook_approves_file_change_requests() {
+    let phases = Arc::new(Mutex::new(Vec::<HookPhase>::new()));
+    let (temp, client) =
+        connect_pre_tool_use_probe_client("runtime_client_pre_tool_use_session").await;
+
+    let session = client
+        .start_session(
+            SessionConfig::new(temp_cwd(&temp))
+                .with_approval_policy(ApprovalPolicy::OnRequest)
+                .with_pre_tool_use_hook(Arc::new(RecordingPreHook {
+                    name: "session_pre_tool",
+                    phases: Arc::clone(&phases),
+                })),
+        )
+        .await
+        .expect("start session");
+
+    let out = session.ask("create file").await.expect("ask");
+    assert_eq!(out.assistant_text, "tool approved");
+    assert!(seen_phase(&phases, HookPhase::PreToolUse));
+    assert_eq!(
+        fs::read_to_string(temp.root.join("pre_tool_use_target.txt")).expect("read target"),
+        "created-by-approved-tool"
+    );
+
+    session.close().await.expect("close session");
     client.shutdown().await.expect("shutdown");
 }

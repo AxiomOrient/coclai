@@ -79,21 +79,26 @@ Runtime infrastructure:
 Traits and types:
 - `PreHook`, `PostHook` — async lifecycle extension traits
 - `HookFuture` — pinned boxed future type alias for hook return values
-- `HookPhase` — `PreRun`, `PostRun`, `PreSessionStart`, `PostSessionStart`, `PreTurn`, `PostTurn`
+- `HookPhase` — `PreRun`, `PostRun`, `PreSessionStart`, `PostSessionStart`, `PreTurn`, `PostTurn`, `PreToolUse`, `PostToolUse`
 - `HookContext` — phase, thread/turn ids, cwd, model, correlation id, metadata
-- `HookAction` — `Noop` or `Mutate(HookPatch)`
+- `HookAction` — `Noop`, `Mutate(HookPatch)`, or `Block(BlockReason)`
+- `BlockReason` — explicit pre-hook deny reason
 - `HookPatch` — `prompt_override`, `model_override`, `add_attachments`, `metadata_delta`
 - `HookAttachment` — `AtPath`, `ImageUrl`, `LocalImage`, `Skill`
 - `HookIssueClass` — `Validation`, `Execution`, `Timeout`, `Internal`
 - `HookIssue` — structured hook failure record
 - `HookReport` — accumulated hook issues for one call
 - `PluginContractVersion` — major-version compatibility check
+- `HookMatcher`, `FilteredPreHook`, `FilteredPostHook` — pure filtering wrappers
+- `ShellCommandHook` — external `sh -c` adapter for pre/post hooks
 
 Contract:
 - Hooks are phase-scoped and opt-in.
 - Plugin compatibility is major-version gated (`PluginContractVersion::is_compatible_with`).
 - Hook issues are recorded in `HookReport` instead of silently discarded.
 - A pre-hook returning `HookAction::Mutate` can override prompt, model, and add attachments.
+- A pre-hook returning `HookAction::Block` stops the call before the next RPC boundary.
+- Tool-use hooks are routed through the internal approval loop and fire for approval-gated tool/file-change requests.
 
 ### `coclai::web`
 
@@ -176,6 +181,8 @@ Client-level builders (affect the connect phase):
 - `with_initialize_capabilities` — override initialize capability switches
 - `enable_experimental_api` — opt into Codex experimental app-server methods and fields
 - `with_global_hooks`, `with_global_pre_hook`, `with_global_post_hook` — register hooks for the entire runtime lifetime
+- `with_global_pre_tool_use_hook` — register approval-loop tool interception hooks
+- `with_shell_pre_hook`, `with_shell_post_hook`, `with_shell_pre_hook_timeout` — register shell-backed global hooks
 
 Run-level builders (affect each prompt or session call):
 - `with_model`, `with_effort`, `with_approval_policy`, `with_sandbox_policy`, `with_timeout`
@@ -218,7 +225,7 @@ Fields: `cli_bin`, `compatibility_guard`, `initialize_capabilities`, `hooks`
 Key builders:
 - `with_cli_bin(...)`, `with_compatibility_guard(...)`, `without_compatibility_guard()`
 - `with_initialize_capabilities(...)`, `enable_experimental_api()`
-- `with_hooks(...)`, `with_pre_hook(...)`, `with_post_hook(...)`
+- `with_hooks(...)`, `with_pre_hook(...)`, `with_post_hook(...)`, `with_pre_tool_use_hook(...)`
 
 Default CLI binary: `codex` (resolved via `PATH`).
 
@@ -246,6 +253,11 @@ Default values:
 | `timeout` | `120s` |
 | `output_schema` | `None` |
 | `hooks` | empty |
+
+Hook builders:
+- `with_hooks(...)`, `with_pre_hook(...)`, `with_post_hook(...)`
+- `with_pre_tool_use_hook(...)`
+- `allow_privileged_escalation()`
 
 ### `SessionConfig`
 
@@ -499,6 +511,13 @@ High-risk sandbox execution requires all of the following:
 
 This rule is applied consistently to: `thread/start`, `thread/resume`, `turn/start`.
 
+### Hook-specific contracts
+
+1. Pre/post hook execution failures are fail-open and recorded in `HookReport`.
+2. `HookAction::Block` is fail-closed and returns `PromptRunError::BlockedByHook`.
+3. Pre-tool-use hooks are observable only when Codex emits approval requests for a tool or file action.
+4. Registering pre-tool-use hooks does not remove sandbox or approval constraints; privileged writes still require explicit escalation opt-in.
+
 ### Canonical parsing and redaction
 
 - Thread id and turn id accept only canonical fields (`thread.id`, `turn.id`).
@@ -533,7 +552,7 @@ Deterministic default gates:
 - `./scripts/check_security_gate.sh`
 - `./scripts/check_product_hygiene.sh`
 
-Opt-in real-server gate:
+Opt-in real-server gate (9 ignored scenarios):
 ```bash
 COCLAI_REAL_SERVER_APPROVED=1 \
 COCLAI_RELEASE_INCLUDE_REAL_SERVER=1 \

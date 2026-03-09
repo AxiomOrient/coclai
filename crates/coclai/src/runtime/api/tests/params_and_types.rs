@@ -372,7 +372,7 @@ fn maps_thread_start_params_to_wire_shape() {
     assert_eq!(wire["serviceTier"], Value::Null);
     assert_eq!(wire["cwd"], "/work");
     assert_eq!(wire["approvalPolicy"], "on-request");
-    assert_eq!(wire["sandbox"]["type"], "readOnly");
+    assert_eq!(wire["sandbox"], "read-only");
     assert_eq!(wire["config"]["telemetry"], true);
     assert_eq!(wire["serviceName"], "codex");
     assert_eq!(wire["baseInstructions"], "base");
@@ -406,7 +406,7 @@ fn maps_thread_resume_overrides_to_supported_subset() {
     assert_eq!(wire["model"], "gpt-5");
     assert_eq!(wire["modelProvider"], "openai");
     assert_eq!(wire["serviceTier"], "flex");
-    assert_eq!(wire["sandbox"]["type"], "readOnly");
+    assert_eq!(wire["sandbox"], "read-only");
     assert_eq!(wire["config"]["telemetry"], true);
     assert_eq!(wire["baseInstructions"], "base");
     assert_eq!(wire["developerInstructions"], "dev");

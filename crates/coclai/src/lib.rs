@@ -3,6 +3,7 @@
 
 mod adapters;
 mod appserver;
+pub mod automation;
 mod domain;
 mod ergonomic;
 pub mod plugin;

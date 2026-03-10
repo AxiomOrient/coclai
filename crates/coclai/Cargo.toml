@@ -1,6 +1,6 @@
 [package]
 name = "coclai"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Ergonomic Rust wrapper for codex app-server with runtime safety and release gates."
 license = "MIT"

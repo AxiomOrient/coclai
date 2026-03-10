@@ -20,8 +20,9 @@ Choose the narrowest surface that solves the job.
 | 1 | `quick_run`, `quick_run_with_profile` | One-shot usage with safe defaults |
 | 2 | `Workflow`, `WorkflowConfig` | Repeated runs with a shared working directory and profile defaults |
 | 3 | `runtime::{Client, Session}` | Explicit session lifecycle and typed run/session configuration |
-| 4 | `AppServer` | Thin JSON-RPC facade with validated request helpers and server-request loop access |
-| 5 | `runtime::Runtime` + raw JSON-RPC | Full runtime control, live events, raw/validated RPC; raw mode for experimental or custom methods |
+| 4 | `automation::{spawn, AutomationSpec}` | Repeated turns on one prepared `Session` with absolute time bounds |
+| 5 | `AppServer` | Thin JSON-RPC facade with validated request helpers and server-request loop access |
+| 6 | `runtime::Runtime` + raw JSON-RPC | Full runtime control, live events, raw/validated RPC; raw mode for experimental or custom methods |
 
 ## Public Surface Map
 
@@ -31,6 +32,7 @@ Choose the narrowest surface that solves the job.
 - `QuickRunError`
 - `Workflow`
 - `WorkflowConfig`
+- `automation::{spawn, AutomationHandle, AutomationSpec, AutomationState, AutomationStatus}`
 - `AppServer`
 - `rpc_methods` (re-export of `runtime::rpc_contract::methods`)
 - `web` (optional)
@@ -116,6 +118,53 @@ Contract:
 - This module bridges runtime sessions into web-facing session and approval flows.
 - It is multi-tenant by explicit `tenant_id` and `session_id` boundaries.
 - Approval responses are posted back through the adapter, not by mutating runtime state directly.
+
+### `coclai::automation`
+
+Primary types:
+- `AutomationSpec`
+- `AutomationStatus`
+- `AutomationState`
+- `AutomationHandle`
+- `spawn(session, spec)`
+
+`AutomationSpec` fields:
+- `prompt: String`
+- `start_at: Option<SystemTime>`
+- `every: Duration` — fixed interval, must be greater than zero
+- `stop_at: Option<SystemTime>`
+- `max_runs: Option<u32>`
+
+`AutomationStatus` fields:
+- `thread_id: String`
+- `runs_completed: u32`
+- `next_due_at: Option<SystemTime>`
+- `last_started_at: Option<SystemTime>`
+- `last_finished_at: Option<SystemTime>`
+- `state: AutomationState`
+- `last_error: Option<String>`
+
+`AutomationState` variants:
+- `Waiting`
+- `Running`
+- `Stopped`
+- `Failed`
+
+`AutomationHandle` methods:
+- `stop(&self)` — request stop and wake the scheduler if it is sleeping
+- `wait(self)` — wait for the background task and return the terminal status snapshot
+- `status(&self)` — clone the latest status snapshot
+
+Contract:
+- `spawn` starts one background task and returns immediately
+- invalid specs do not panic; `every == Duration::ZERO` yields an immediately failed handle status
+- the runner reuses the given `Session` for every turn and never creates a second session
+- the runner never overlaps turns; one automation handle drives one single-flight loop
+- scheduling uses absolute `SystemTime` boundaries plus one fixed `Duration`; no cron or timezone parsing is built in
+- if a scheduled moment is missed while a turn is still running, V1 collapses backlog into one next eligible run
+- `stop_at` is an exclusive boundary; runs due at or after it are not started
+- any `PromptRunError` is terminal, recorded in `last_error`, and moves the runner to `Failed`
+- V1 is session-scoped and non-durable; restart recovery and persistence are out of scope
 
 ### Public runtime submodules
 

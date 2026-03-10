@@ -2,15 +2,16 @@
 
 `coclai` is a Rust wrapper around the local `codex app-server`—the stdio JSON-RPC backend spawned by the `codex` CLI binary.
 
-It exposes five layers so you can start simple and reach deeper only when needed:
+It exposes six layers so you can start simple and reach deeper only when needed:
 
 | Layer | Entry point | When to use |
 |-------|-------------|-------------|
 | 1 | `quick_run`, `quick_run_with_profile` | One prompt, disposable session |
 | 2 | `Workflow`, `WorkflowConfig` | Repeated runs in one working directory |
 | 3 | `runtime::{Client, Session}` | Explicit session lifecycle, resume, interrupt |
-| 4 | `AppServer` | Direct JSON-RPC with typed helpers and server-request loop |
-| 5 | `runtime::Runtime` or raw JSON-RPC | Full control, live events, experimental access |
+| 4 | `automation::{spawn, AutomationSpec}` | Schedule repeated turns on one prepared `Session` |
+| 5 | `AppServer` | Direct JSON-RPC with typed helpers and server-request loop |
+| 6 | `runtime::Runtime` or raw JSON-RPC | Full control, live events, experimental access |
 
 ## Install
 
@@ -19,7 +20,7 @@ It exposes five layers so you can start simple and reach deeper only when needed
 Published crate:
 ```toml
 [dependencies]
-coclai = "0.2.2"
+coclai = "0.3.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -100,6 +101,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### `automation::spawn`
+```rust
+use std::time::{Duration, SystemTime};
+
+use coclai::automation::{spawn, AutomationSpec};
+use coclai::runtime::{Client, SessionConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::connect_default().await?;
+    let session = client
+        .start_session(SessionConfig::new("/abs/path/workdir"))
+        .await?;
+
+    let handle = spawn(
+        session,
+        AutomationSpec {
+            prompt: "Keep reducing the backlog one item at a time".to_owned(),
+            start_at: Some(SystemTime::now() + Duration::from_secs(60)),
+            every: Duration::from_secs(1800),
+            stop_at: Some(SystemTime::now() + Duration::from_secs(8 * 3600)),
+            max_runs: None,
+        },
+    );
+
+    let status = handle.wait().await;
+    println!("{status:?}");
+    client.shutdown().await?;
+    Ok(())
+}
+```
+
+Contract:
+- automation reuses one prepared `Session`; it does not create or resume sessions for you
+- scheduling uses absolute `SystemTime` bounds plus one fixed `Duration`
+- `every` must be greater than zero
+- only one turn is in flight at a time
+- missed ticks collapse into one next eligible run
+- any `PromptRunError` stops the runner and records `last_error`
+- V1 does not provide cron parsing or restart persistence
+
 ### `AppServer`
 ```rust
 use coclai::runtime::CommandExecParams;
@@ -146,6 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Module | Role |
 |--------|------|
 | `coclai` | Root: `quick_run`, `Workflow`, `WorkflowConfig`, `AppServer`, `rpc_methods` |
+| `coclai::automation` | Optional session-scoped recurring prompt runner above one prepared `Session` |
 | `coclai::runtime` | Low-level runtime: `Client`, `Session`, `Runtime`, typed models, errors |
 | `coclai::plugin` | Hook extension point: `PreHook`, `PostHook`, `HookContext`, `HookPatch` |
 | `coclai::web` | Optional HTTP adapter bridging runtime sessions to SSE/REST web services |

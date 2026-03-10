@@ -32,6 +32,10 @@ Choose the narrowest surface that solves the job.
 - `QuickRunError`
 - `Workflow`
 - `WorkflowConfig`
+- `HookMatcher`
+- `FilteredPreHook`
+- `FilteredPostHook`
+- `ShellCommandHook`
 - `automation::{spawn, AutomationHandle, AutomationSpec, AutomationState, AutomationStatus}`
 - `AppServer`
 - `rpc_methods` (re-export of `runtime::rpc_contract::methods`)
@@ -43,7 +47,7 @@ Choose the narrowest surface that solves the job.
 ### `coclai::runtime` re-exports
 
 Configuration and lifecycle:
-- `Client`, `ClientConfig`, `CompatibilityGuard`, `SemVerTriplet`
+- `Client`, `ClientConfig`, `ClientError`, `CompatibilityGuard`, `SemVerTriplet`
 - `Session`, `SessionConfig`, `RunProfile`
 - `Runtime`, `RuntimeConfig`, `InitializeCapabilities`, `RestartPolicy`, `SupervisorConfig`
 - `RuntimeHookConfig`, `RuntimeMetricsSnapshot`
@@ -92,7 +96,7 @@ Traits and types:
 - `HookReport` — accumulated hook issues for one call
 - `PluginContractVersion` — major-version compatibility check
 - `HookMatcher`, `FilteredPreHook`, `FilteredPostHook` — pure filtering wrappers
-- `ShellCommandHook` — external `sh -c` adapter for pre/post hooks
+- `ShellCommandHook` — external `sh -c` adapter re-exported from `coclai::runtime` and crate root
 
 Contract:
 - Hooks are phase-scoped and opt-in.
@@ -106,6 +110,7 @@ Contract:
 
 Primary types:
 - `WebAdapter`, `WebAdapterConfig`
+- `RuntimeWebAdapter`, `WebPluginAdapter`, `WebRuntimeStreams`
 - `CreateSessionRequest`, `CreateSessionResponse`
 - `CreateTurnRequest`, `CreateTurnResponse`
 - `CloseSessionResponse`
@@ -114,10 +119,46 @@ Primary types:
 - `new_session_id()`
 - `serialize_sse_envelope(...)`
 
+Primary methods:
+- `WebAdapter::spawn(runtime, config)` — build the default runtime-backed adapter
+- `WebAdapter::spawn_with_adapter(adapter, config)` — inject a custom adapter implementation
+- `create_session(tenant_id, request)` — create one runtime-backed web session
+- `create_turn(tenant_id, session_id, request)` — start one turn inside an existing web session
+- `close_session(tenant_id, session_id)` — close one mapped session
+- `subscribe_session_events(tenant_id, session_id)` — subscribe to SSE-ready runtime envelopes
+- `subscribe_session_approvals(tenant_id, session_id)` — subscribe to approval requests routed to one web session
+- `post_approval(tenant_id, session_id, approval_id, payload)` — answer one pending approval request
+
 Contract:
 - This module bridges runtime sessions into web-facing session and approval flows.
 - It is multi-tenant by explicit `tenant_id` and `session_id` boundaries.
 - Approval responses are posted back through the adapter, not by mutating runtime state directly.
+
+### `coclai::artifact`
+
+Primary types:
+- `ArtifactSessionManager`
+- `ArtifactPluginAdapter`, `RuntimeArtifactAdapter`
+- `ArtifactSession`
+- `ArtifactTaskSpec`, `ArtifactTaskKind`, `ArtifactTaskResult`
+- `ArtifactMeta`, `SaveMeta`
+- `ArtifactStore`, `FsArtifactStore`
+- `DomainError`, `StoreErr`, `PatchConflict`
+- `DocPatch`, `ValidatedPatch`
+- `compute_revision(...)`, `validate_doc_patch(...)`, `apply_doc_patch(...)`
+
+Primary methods:
+- `ArtifactSessionManager::new(runtime, store)` — build the default runtime-backed artifact manager
+- `ArtifactSessionManager::new_with_adapter(adapter, store)` — inject a custom artifact adapter
+- `open(artifact_id)` — load or create one artifact session and bind it to a runtime thread
+- `run_task(spec)` — execute one typed artifact task against the bound thread and store
+- `FsArtifactStore::new(root)` — create a filesystem-backed store rooted at `root`
+
+Contract:
+- This module layers persistent artifact state on top of runtime threads.
+- `ArtifactSessionManager` resumes an existing stored runtime thread id when present; otherwise it starts a new thread.
+- Contract compatibility is checked against `PluginContractVersion::CURRENT` before artifact operations proceed.
+- Patch helpers are pure document transforms; store and runtime side effects stay inside the manager/adapter boundary.
 
 ### `coclai::automation`
 

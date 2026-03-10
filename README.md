@@ -20,7 +20,7 @@ It exposes six layers so you can start simple and reach deeper only when needed:
 Published crate:
 ```toml
 [dependencies]
-coclai = "0.3.0"
+coclai = "0.3.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -187,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Module | Role |
 |--------|------|
-| `coclai` | Root: `quick_run`, `Workflow`, `WorkflowConfig`, `AppServer`, `rpc_methods` |
+| `coclai` | Root: `quick_run`, `Workflow`, `WorkflowConfig`, `AppServer`, `rpc_methods`, `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, `ShellCommandHook` |
 | `coclai::automation` | Optional session-scoped recurring prompt runner above one prepared `Session` |
 | `coclai::runtime` | Low-level runtime: `Client`, `Session`, `Runtime`, typed models, errors |
 | `coclai::plugin` | Hook extension point: `PreHook`, `PostHook`, `HookContext`, `HookPatch` |
@@ -199,6 +199,34 @@ Important runtime submodules available for direct use when re-exports are not en
 `runtime::errors`, `runtime::events`, `runtime::hooks`, `runtime::metrics`,
 `runtime::rpc`, `runtime::rpc_contract`, `runtime::sink`, `runtime::state`,
 `runtime::transport`, `runtime::turn_output`
+
+## Optional Modules
+
+### `coclai::web`
+
+Primary entry points:
+- `WebAdapter::spawn(runtime, config)` or `spawn_with_adapter(...)`
+- `create_session(...)`, `create_turn(...)`, `close_session(...)`
+- `subscribe_session_events(...)`, `subscribe_session_approvals(...)`
+- `post_approval(...)`
+- `new_session_id()`, `serialize_sse_envelope(...)`
+
+Contract:
+- one `WebAdapter` bridges runtime threads into tenant/session-scoped web sessions
+- approval replies flow back through `post_approval(...)`; callers do not mutate runtime approval state directly
+
+### `coclai::artifact`
+
+Primary entry points:
+- `ArtifactSessionManager::new(runtime, store)` or `new_with_adapter(...)`
+- `open(artifact_id)` — load or create one artifact-backed runtime thread
+- `run_task(spec)` — execute one typed artifact task
+- `FsArtifactStore::new(root)` — filesystem-backed store
+- pure helpers: `compute_revision(...)`, `validate_doc_patch(...)`, `apply_doc_patch(...)`
+
+Contract:
+- the module keeps artifact state in an `ArtifactStore` and delegates runtime turns through an adapter
+- compatibility is gated by `PluginContractVersion` before artifact tasks run
 
 ## Hooks
 
@@ -238,6 +266,9 @@ Ergonomic builders:
 - global hooks: `with_global_pre_hook`, `with_global_post_hook`, `with_global_pre_tool_use_hook`
 - run-scoped hooks: `with_run_pre_hook`, `with_run_post_hook`
 - shell adapters: `with_shell_pre_hook`, `with_shell_post_hook`, `with_shell_pre_hook_timeout`
+
+Path note:
+- `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, and `ShellCommandHook` are also re-exported at the crate root as `coclai::...`
 
 Important contract:
 - pre-tool-use hooks fire on approval-gated tool/file-change requests, not every successful write

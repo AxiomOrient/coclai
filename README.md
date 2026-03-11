@@ -1,6 +1,6 @@
-# coclai
+# Codekko
 
-`coclai` is a Rust wrapper around the local `codex app-server`—the stdio JSON-RPC backend spawned by the `codex` CLI binary.
+`Codekko` is a Rust wrapper around the local `codex app-server`—the stdio JSON-RPC backend spawned by the `codex` CLI binary.
 
 It exposes six layers so you can start simple and reach deeper only when needed:
 
@@ -20,14 +20,14 @@ It exposes six layers so you can start simple and reach deeper only when needed:
 Published crate:
 ```toml
 [dependencies]
-coclai = "0.3.1"
+codekko = "0.4.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 Local workspace dependency:
 ```toml
 [dependencies]
-coclai = { path = "crates/coclai" }
+codekko = { path = "crates/codekko" }
 ```
 
 ## Safe Defaults
@@ -46,7 +46,7 @@ All entry points share the same safe defaults unless explicitly overridden:
 
 ### `quick_run`
 ```rust
-use coclai::quick_run;
+use codekko::quick_run;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Workflow`
 ```rust
-use coclai::{Workflow, WorkflowConfig};
+use codekko::{Workflow, WorkflowConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Client` and `Session`
 ```rust
-use coclai::runtime::{Client, SessionConfig};
+use codekko::runtime::{Client, SessionConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -105,8 +105,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 use std::time::{Duration, SystemTime};
 
-use coclai::automation::{spawn, AutomationSpec};
-use coclai::runtime::{Client, SessionConfig};
+use codekko::automation::{spawn, AutomationSpec};
+use codekko::runtime::{Client, SessionConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -144,8 +144,8 @@ Contract:
 
 ### `AppServer`
 ```rust
-use coclai::runtime::CommandExecParams;
-use coclai::AppServer;
+use codekko::runtime::CommandExecParams;
+use codekko::AppServer;
 use serde_json::json;
 
 #[tokio::main]
@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _thread = app
         .request_json(
-            coclai::rpc_methods::THREAD_START,
+            codekko::rpc_methods::THREAD_START,
             json!({
                 "cwd": "/abs/path/workdir",
                 "sandbox": "read-only"
@@ -187,12 +187,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Module | Role |
 |--------|------|
-| `coclai` | Root: `quick_run`, `Workflow`, `WorkflowConfig`, `AppServer`, `rpc_methods`, `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, `ShellCommandHook` |
-| `coclai::automation` | Optional session-scoped recurring prompt runner above one prepared `Session` |
-| `coclai::runtime` | Low-level runtime: `Client`, `Session`, `Runtime`, typed models, errors |
-| `coclai::plugin` | Hook extension point: `PreHook`, `PostHook`, `HookContext`, `HookPatch` |
-| `coclai::web` | Optional HTTP adapter bridging runtime sessions to SSE/REST web services |
-| `coclai::artifact` | Optional artifact tracking domain built on top of the runtime |
+| `codekko` | Root: `quick_run`, `Workflow`, `WorkflowConfig`, `AppServer`, `rpc_methods`, `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, `ShellCommandHook` |
+| `codekko::automation` | Optional session-scoped recurring prompt runner above one prepared `Session` |
+| `codekko::runtime` | Low-level runtime: `Client`, `Session`, `Runtime`, typed models, errors |
+| `codekko::plugin` | Hook extension point: `PreHook`, `PostHook`, `HookContext`, `HookPatch` |
+| `codekko::web` | Optional HTTP adapter bridging runtime sessions to SSE/REST web services |
+| `codekko::artifact` | Optional artifact tracking domain built on top of the runtime |
 
 Important runtime submodules available for direct use when re-exports are not enough:
 `runtime::api`, `runtime::approvals`, `runtime::client`, `runtime::core`,
@@ -202,7 +202,7 @@ Important runtime submodules available for direct use when re-exports are not en
 
 ## Optional Modules
 
-### `coclai::web`
+### `codekko::web`
 
 Primary entry points:
 - `WebAdapter::spawn(runtime, config)` or `spawn_with_adapter(...)`
@@ -215,7 +215,7 @@ Contract:
 - one `WebAdapter` bridges runtime threads into tenant/session-scoped web sessions
 - approval replies flow back through `post_approval(...)`; callers do not mutate runtime approval state directly
 
-### `coclai::artifact`
+### `codekko::artifact`
 
 Primary entry points:
 - `ArtifactSessionManager::new(runtime, store)` or `new_with_adapter(...)`
@@ -234,7 +234,7 @@ Hooks let you intercept and mutate prompt calls at defined lifecycle phases with
 
 ```rust
 use std::sync::Arc;
-use coclai::{WorkflowConfig, plugin::{PreHook, HookContext, HookAction, HookFuture, HookIssue}};
+use codekko::{WorkflowConfig, plugin::{PreHook, HookContext, HookAction, HookFuture, HookIssue}};
 
 struct LoggingHook;
 
@@ -268,7 +268,7 @@ Ergonomic builders:
 - shell adapters: `with_shell_pre_hook`, `with_shell_post_hook`, `with_shell_pre_hook_timeout`
 
 Path note:
-- `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, and `ShellCommandHook` are also re-exported at the crate root as `coclai::...`
+- `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, and `ShellCommandHook` are also re-exported at the crate root as `codekko::...`
 
 Important contract:
 - pre-tool-use hooks fire on approval-gated tool/file-change requests, not every successful write
@@ -301,8 +301,8 @@ Release preflight:
 
 Opt-in real-server preflight:
 ```bash
-COCLAI_REAL_SERVER_APPROVED=1 \
-COCLAI_RELEASE_INCLUDE_REAL_SERVER=1 \
+CODEKKO_REAL_SERVER_APPROVED=1 \
+CODEKKO_RELEASE_INCLUDE_REAL_SERVER=1 \
 ./scripts/release_preflight.sh
 ```
 

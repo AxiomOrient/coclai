@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-PKG="${COCLAI_PKG:-coclai}"
+PKG="${CODEKKO_PKG:-${COCLAI_PKG:-codekko}}"
 
 BLOCKER_TESTS=(
   "runtime::api::tests::run_prompt::run_prompt_lagged_thread_read_respects_absolute_deadline"

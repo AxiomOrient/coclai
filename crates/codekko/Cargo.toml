@@ -1,10 +1,10 @@
 [package]
-name = "coclai"
-version = "0.3.1"
+name = "codekko"
+version = "0.4.0"
 edition = "2021"
 description = "Ergonomic Rust wrapper for codex app-server with runtime safety and release gates."
 license = "MIT"
-repository = "https://github.com/AxiomOrient/coclai"
+repository = "https://github.com/AxiomOrient/codekko"
 readme = "../../README.md"
 keywords = ["codex", "ai", "llm", "automation", "cli"]
 categories = ["asynchronous", "api-bindings", "development-tools"]

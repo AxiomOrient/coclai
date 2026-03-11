@@ -1,5 +1,5 @@
-//! Public facade for the coclai workspace.
-//! Default path: use this crate first. Use `coclai::runtime` for low-level control.
+//! Public facade for the Codekko workspace.
+//! Default path: use this crate first. Use `codekko::runtime` for low-level control.
 
 mod adapters;
 mod appserver;

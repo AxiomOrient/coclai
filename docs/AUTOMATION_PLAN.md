@@ -17,9 +17,9 @@ It must support the core user job:
 
 This is enough for "start tonight and keep working through the night" while the same process stays alive.
 
-## Why This Belongs In `coclai`
+## Why This Belongs In `codekko`
 
-`coclai` already exposes the right primitives:
+`codekko` already exposes the right primitives:
 
 - `Client::start_session` and `Client::resume_session` create or restore a reusable thread
 - `Session::ask` continues the loaded thread without reopening it
@@ -31,11 +31,11 @@ The missing piece is not another runtime layer. The missing piece is a small orc
 
 Add a new optional top-level module:
 
-- `crates/coclai/src/automation.rs`
+- `crates/codekko/src/automation.rs`
 
 Export it from:
 
-- `crates/coclai/src/lib.rs`
+- `crates/codekko/src/lib.rs`
 
 Do not add this feature to:
 
@@ -48,7 +48,7 @@ Do not add this feature to:
 
 In scope:
 
-- one new `coclai::automation` module
+- one new `codekko::automation` module
 - one public entrypoint that accepts an existing `Session`
 - one typed schedule model based on absolute times and `Duration`
 - one background runner task
@@ -184,12 +184,12 @@ Timing model:
 
 Create:
 
-- `crates/coclai/src/automation.rs`
+- `crates/codekko/src/automation.rs`
 - `docs/AUTOMATION_TASKS.md`
 
 Update:
 
-- `crates/coclai/src/lib.rs`
+- `crates/codekko/src/lib.rs`
 - `README.md`
 - `docs/API_REFERENCE.md`
 
@@ -302,7 +302,7 @@ Documentation checks:
 
 ## Explicit Non-Goal For This Delivery
 
-This work does not make `coclai` a durable overnight worker by itself.
+This work does not make `codekko` a durable overnight worker by itself.
 
 If the user later wants:
 

@@ -183,9 +183,18 @@ where
 
     let mut due_at = {
         let status = shared.status.lock().await;
-        status
-            .next_due_at
-            .expect("non-terminal automation must have next due time")
+        match status.next_due_at {
+            Some(due_at) => due_at,
+            None => {
+                drop(status);
+                return mark_failed(
+                    &shared,
+                    None,
+                    "automation status invariant violated: missing next due time".to_owned(),
+                )
+                .await;
+            }
+        }
     };
 
     loop {

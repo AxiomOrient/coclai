@@ -5,16 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-03-11
+
+### Changed
+- project, crate, folder, docs, and release surface renamed from `coclai` to `codekko`
+- root import paths, workspace paths, release scripts, and real-server opt-in environment names now use the `codekko` identity
+- README and API reference now describe the renamed public surface under `codekko`
+
 ## [0.3.1] - 2026-03-10
 
 ### Changed
 - README and API reference now document the full published public surface for root hook re-exports, `web`, and `artifact`
-- `ShellCommandHook` documentation now points at its real public paths (`coclai` and `coclai::runtime`)
+- `ShellCommandHook` documentation now points at its real public paths (`codekko` and `codekko::runtime`)
 
 ## [0.3.0] - 2026-03-10
 
 ### Added
-- session-scoped `coclai::automation` module with `AutomationSpec`, `AutomationStatus`, `AutomationHandle`, and `spawn(session, spec)`
+- session-scoped `codekko::automation` module with `AutomationSpec`, `AutomationStatus`, `AutomationHandle`, and `spawn(session, spec)`
 - single-flight recurring runner coverage for delayed start, stop-at boundaries, max-runs, same-thread reuse, explicit stop, and closed-session terminal failure
 - public automation contract documentation in the README and API reference
 - automation design and task docs under `docs/AUTOMATION_PLAN.md` and `docs/AUTOMATION_TASKS.md`

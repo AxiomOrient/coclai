@@ -23,7 +23,8 @@ const APPROVAL_ATTEMPT_TIMEOUT: TokioDuration = TokioDuration::from_secs(480);
 const APPROVAL_REQUEST_TIMEOUT: TokioDuration = TokioDuration::from_secs(240);
 const APPROVAL_COMPLETION_TIMEOUT: TokioDuration = TokioDuration::from_secs(240);
 const APPROVAL_FILE_TEXT: &str = "approval-needed";
-const REAL_SERVER_APPROVAL_ENV: &str = "COCLAI_REAL_SERVER_APPROVED";
+const REAL_SERVER_APPROVAL_ENV: &str = "CODEKKO_REAL_SERVER_APPROVED";
+const LEGACY_REAL_SERVER_APPROVAL_ENV: &str = "COCLAI_REAL_SERVER_APPROVED";
 const ATTACHED_DOC_TOKEN: &str = "sandboxPolicy";
 const SESSION_MEMORY_TOKEN: &str = "AXIOM-742";
 const RESUME_MEMORY_TOKEN: &str = "LATTICE-931";
@@ -35,7 +36,7 @@ struct ScratchDirGuard {
 
 impl ScratchDirGuard {
     fn new(label: &str) -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!("coclai-{label}-{}", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("codekko-{label}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path)
             .map_err(|err| format!("failed to create scratch dir {}: {err}", path.display()))?;
         Ok(Self { path })
@@ -60,7 +61,9 @@ impl Drop for ScratchDirGuard {
 }
 
 fn ensure_real_server_opt_in() -> Result<(), String> {
-    match std::env::var(REAL_SERVER_APPROVAL_ENV) {
+    match std::env::var(REAL_SERVER_APPROVAL_ENV)
+        .or_else(|_| std::env::var(LEGACY_REAL_SERVER_APPROVAL_ENV))
+    {
         Ok(v) if v == "1" => Ok(()),
         _ => Err(format!(
             "real-server test requires explicit approval: set {REAL_SERVER_APPROVAL_ENV}=1"

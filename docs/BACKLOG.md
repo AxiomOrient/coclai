@@ -7,7 +7,7 @@ Tracked improvement items. Each entry includes scope, motivation, implementation
 ## ITEM-1: `SessionConfig::with_cwd()` builder
 
 **Priority:** Low
-**Scope:** `crates/coclai/src/runtime/client/profile.rs`
+**Scope:** `crates/codekko/src/runtime/client/profile.rs`
 
 ### Motivation
 
@@ -59,7 +59,7 @@ fn session_config_with_cwd_replaces_cwd() {
 ## ITEM-2: Derive `KNOWN` from `RPC_CONTRACT_DESCRIPTORS`
 
 **Priority:** Low
-**Scope:** `crates/coclai/src/runtime/rpc_contract.rs`
+**Scope:** `crates/codekko/src/runtime/rpc_contract.rs`
 
 ### Motivation
 
@@ -111,4 +111,4 @@ Option A is preferred because `KNOWN` is part of the public API surface (`rpc_co
 
 ### Test Strategy
 
-No new tests needed. The existing tests verify the output. After the change, confirm that `methods::KNOWN` is still accessible via `coclai::runtime::rpc_contract::methods::KNOWN` (the public path in `rpc_contract::methods` must remain intact).
+No new tests needed. The existing tests verify the output. After the change, confirm that `methods::KNOWN` is still accessible via `codekko::runtime::rpc_contract::methods::KNOWN` (the public path in `rpc_contract::methods` must remain intact).

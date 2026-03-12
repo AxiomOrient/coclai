@@ -1,5 +1,5 @@
-//! Public facade for the Codekko workspace.
-//! Default path: use this crate first. Use `codekko::runtime` for low-level control.
+//! Public facade for the Codex Runtime workspace.
+//! Default path: use this crate first. Use `codex_runtime::runtime` for low-level control.
 
 mod adapters;
 mod appserver;

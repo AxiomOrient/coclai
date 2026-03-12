@@ -10,29 +10,29 @@
 - `integration`: mock runtime 또는 실제 runtime wiring을 통한 end-to-end 흐름 검증.
 
 ## 모듈별 매핑
-- `crates/codekko/src/adapters/web/tests`
+- `crates/codex-runtime/src/adapters/web/tests`
   - `serialization` (unit)
   - `approval_boundaries` (contract)
   - `contract_and_spawn` (contract)
   - `approvals` (integration)
   - `routing_observability` (integration)
   - `session_flows` (integration)
-- `crates/codekko/src/appserver/tests`
+- `crates/codex-runtime/src/appserver/tests`
   - `contract` (unit)
   - `validated_calls` (contract; low-level typed parity entrypoints)
   - `server_requests` (integration)
-- `crates/codekko/src/runtime/api/tests`
+- `crates/codex-runtime/src/runtime/api/tests`
   - `params_and_types` (unit; wire shape, skills, command-exec, thread/turn override serialization)
   - `thread_api` (contract + integration; low-level thread/turn wrappers, override roundtrip, security boundaries)
   - `run_prompt` (integration)
-- `crates/codekko/src/domain/artifact/tests.rs`
+- `crates/codex-runtime/src/domain/artifact/tests.rs`
   - `unit_core`
   - `collect_output` (contract)
   - `runtime_tasks` (integration)
-- `crates/codekko/src/ergonomic/tests`
+- `crates/codex-runtime/src/ergonomic/tests`
   - `unit` (unit)
   - `real_server` (integration, opt-in only)
-- `crates/codekko/src/plugin/tests`
+- `crates/codex-runtime/src/plugin/tests`
   - `hook_report` (unit)
   - `contract_version` (contract)
 
@@ -46,8 +46,8 @@
 - 기본 전체 세트:
   - `cargo test --workspace`
 - opt-in 실서버 세트(9개 ignored 시나리오, release preflight 포함 가능):
-  - `CODEKKO_REAL_SERVER_APPROVED=1 cargo test -p codekko ergonomic::tests::real_server:: -- --ignored --nocapture`
+  - `CODEX_RUNTIME_REAL_SERVER_APPROVED=1 cargo test -p codex-runtime ergonomic::tests::real_server:: -- --ignored --nocapture`
 - 레이어별 예시:
-  - `cargo test -p codekko runtime::api::tests::params_and_types:: -- --nocapture`
-  - `cargo test -p codekko adapters::web::tests::contract_and_spawn:: -- --nocapture`
-  - `cargo test -p codekko domain::artifact::tests::runtime_tasks:: -- --nocapture`
+  - `cargo test -p codex-runtime runtime::api::tests::params_and_types:: -- --nocapture`
+  - `cargo test -p codex-runtime adapters::web::tests::contract_and_spawn:: -- --nocapture`
+  - `cargo test -p codex-runtime domain::artifact::tests::runtime_tasks:: -- --nocapture`

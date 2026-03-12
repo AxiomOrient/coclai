@@ -172,7 +172,7 @@ fn thread_start_params() -> Value {
 }
 
 async fn connect_real_appserver() -> MockAppServer {
-    let temp = std::sync::Arc::new(TempDir::new("codekko_appserver_tests"));
+    let temp = std::sync::Arc::new(TempDir::new("codex_runtime_appserver_tests"));
     let cli = write_mock_cli_script(&temp.root);
     let app = AppServer::connect(
         ClientConfig::new()

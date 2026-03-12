@@ -8,20 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-03-11
 
 ### Changed
-- project, crate, folder, docs, and release surface renamed from `coclai` to `codekko`
-- root import paths, workspace paths, release scripts, and real-server opt-in environment names now use the `codekko` identity
-- README and API reference now describe the renamed public surface under `codekko`
+- project, crate, folder, docs, and release surface renamed from the previous identity
+- root import paths, workspace paths, release scripts, and real-server opt-in environment names now use the current identity
+- README and API reference now describe the current public surface
 
 ## [0.3.1] - 2026-03-10
 
 ### Changed
 - README and API reference now document the full published public surface for root hook re-exports, `web`, and `artifact`
-- `ShellCommandHook` documentation now points at its real public paths (`codekko` and `codekko::runtime`)
+- `ShellCommandHook` documentation now points at its real public root and runtime paths
 
 ## [0.3.0] - 2026-03-10
 
 ### Added
-- session-scoped `codekko::automation` module with `AutomationSpec`, `AutomationStatus`, `AutomationHandle`, and `spawn(session, spec)`
+- session-scoped automation module with `AutomationSpec`, `AutomationStatus`, `AutomationHandle`, and `spawn(session, spec)`
 - single-flight recurring runner coverage for delayed start, stop-at boundaries, max-runs, same-thread reuse, explicit stop, and closed-session terminal failure
 - public automation contract documentation in the README and API reference
 - automation design and task docs under `docs/AUTOMATION_PLAN.md` and `docs/AUTOMATION_TASKS.md`

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-PKG="${CODEKKO_PKG:-${COCLAI_PKG:-codekko}}"
+PKG="${CODEX_RUNTIME_PKG:-codex-runtime}"
 
 echo "[security] gate: approval routing policy"
 cargo test -p "$PKG" runtime::approvals::tests:: -- --nocapture

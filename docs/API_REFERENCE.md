@@ -1,6 +1,8 @@
 # API_REFERENCE
 
-`Codekko` exposes a layered API around the local `codex app-server`.
+`Codex Runtime` is the repository and package name. The Rust import path is `codex_runtime`.
+
+This reference documents the current public Rust surface after the rename.
 
 This document fixes the public API boundary, the typed payload contracts, and the validation and security rules.
 
@@ -26,7 +28,7 @@ Choose the narrowest surface that solves the job.
 
 ## Public Surface Map
 
-### Root crate (`codekko`)
+### Root crate (`codex_runtime`)
 - `quick_run`
 - `quick_run_with_profile`
 - `QuickRunError`
@@ -44,7 +46,7 @@ Choose the narrowest surface that solves the job.
 - `plugin`
 - `runtime`
 
-### `codekko::runtime` re-exports
+### `codex_runtime::runtime` re-exports
 
 Configuration and lifecycle:
 - `Client`, `ClientConfig`, `ClientError`, `CompatibilityGuard`, `SemVerTriplet`
@@ -80,7 +82,7 @@ Runtime infrastructure:
 - `RpcError`, `RpcErrorObject`, `RuntimeError`, `SinkError`
 - `RpcValidationMode`
 
-### `codekko::plugin`
+### `codex_runtime::plugin`
 
 Traits and types:
 - `PreHook`, `PostHook` — async lifecycle extension traits
@@ -96,7 +98,7 @@ Traits and types:
 - `HookReport` — accumulated hook issues for one call
 - `PluginContractVersion` — major-version compatibility check
 - `HookMatcher`, `FilteredPreHook`, `FilteredPostHook` — pure filtering wrappers
-- `ShellCommandHook` — external `sh -c` adapter re-exported from `codekko::runtime` and crate root
+- `ShellCommandHook` — external `sh -c` adapter re-exported from `codex_runtime::runtime` and crate root
 
 Contract:
 - Hooks are phase-scoped and opt-in.
@@ -106,7 +108,7 @@ Contract:
 - A pre-hook returning `HookAction::Block` stops the call before the next RPC boundary.
 - Tool-use hooks are routed through the internal approval loop and fire for approval-gated tool/file-change requests.
 
-### `codekko::web`
+### `codex_runtime::web`
 
 Primary types:
 - `WebAdapter`, `WebAdapterConfig`
@@ -134,7 +136,7 @@ Contract:
 - It is multi-tenant by explicit `tenant_id` and `session_id` boundaries.
 - Approval responses are posted back through the adapter, not by mutating runtime state directly.
 
-### `codekko::artifact`
+### `codex_runtime::artifact`
 
 Primary types:
 - `ArtifactSessionManager`
@@ -160,7 +162,7 @@ Contract:
 - Contract compatibility is checked against `PluginContractVersion::CURRENT` before artifact operations proceed.
 - Patch helpers are pure document transforms; store and runtime side effects stay inside the manager/adapter boundary.
 
-### `codekko::automation`
+### `codex_runtime::automation`
 
 Primary types:
 - `AutomationSpec`
@@ -644,8 +646,8 @@ Deterministic default gates:
 
 Opt-in real-server gate (9 ignored scenarios):
 ```bash
-CODEKKO_REAL_SERVER_APPROVED=1 \
-CODEKKO_RELEASE_INCLUDE_REAL_SERVER=1 \
+CODEX_RUNTIME_REAL_SERVER_APPROVED=1 \
+CODEX_RUNTIME_RELEASE_INCLUDE_REAL_SERVER=1 \
 ./scripts/release_preflight.sh
 ```
 

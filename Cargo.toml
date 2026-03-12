@@ -1,8 +1,8 @@
 [workspace]
 members = [
-  "crates/codekko"
+  "crates/codex-runtime"
 ]
-default-members = ["crates/codekko"]
+default-members = ["crates/codex-runtime"]
 resolver = "2"
 
 [workspace.package]

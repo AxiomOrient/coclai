@@ -4,35 +4,35 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-PKG="${CODEKKO_PKG:-${COCLAI_PKG:-codekko}}"
-INCLUDE_REAL_SERVER="${CODEKKO_RELEASE_INCLUDE_REAL_SERVER:-${COCLAI_RELEASE_INCLUDE_REAL_SERVER:-0}}"
-REAL_SERVER_RETRIES="${CODEKKO_RELEASE_REAL_SERVER_RETRIES:-${COCLAI_RELEASE_REAL_SERVER_RETRIES:-3}}"
-REAL_SERVER_BACKOFF_SEC="${CODEKKO_RELEASE_REAL_SERVER_BACKOFF_SEC:-${COCLAI_RELEASE_REAL_SERVER_BACKOFF_SEC:-3}}"
-REAL_SERVER_APPROVED="${CODEKKO_REAL_SERVER_APPROVED:-${COCLAI_REAL_SERVER_APPROVED:-0}}"
+PKG="${CODEX_RUNTIME_PKG:-codex-runtime}"
+INCLUDE_REAL_SERVER="${CODEX_RUNTIME_RELEASE_INCLUDE_REAL_SERVER:-0}"
+REAL_SERVER_RETRIES="${CODEX_RUNTIME_RELEASE_REAL_SERVER_RETRIES:-3}"
+REAL_SERVER_BACKOFF_SEC="${CODEX_RUNTIME_RELEASE_REAL_SERVER_BACKOFF_SEC:-3}"
+REAL_SERVER_APPROVED="${CODEX_RUNTIME_REAL_SERVER_APPROVED:-0}"
 
 case "$INCLUDE_REAL_SERVER" in
   0|1) ;;
   *)
-    echo "[release] invalid CODEKKO_RELEASE_INCLUDE_REAL_SERVER=$INCLUDE_REAL_SERVER (allowed: 0|1)" >&2
+    echo "[release] invalid CODEX_RUNTIME_RELEASE_INCLUDE_REAL_SERVER=$INCLUDE_REAL_SERVER (allowed: 0|1)" >&2
     exit 2
     ;;
 esac
 
 case "$REAL_SERVER_RETRIES" in
   ''|*[!0-9]*)
-    echo "[release] invalid CODEKKO_RELEASE_REAL_SERVER_RETRIES=$REAL_SERVER_RETRIES (allowed: integer >= 1)" >&2
+    echo "[release] invalid CODEX_RUNTIME_RELEASE_REAL_SERVER_RETRIES=$REAL_SERVER_RETRIES (allowed: integer >= 1)" >&2
     exit 2
     ;;
 esac
 
 if [ "$REAL_SERVER_RETRIES" -lt 1 ]; then
-  echo "[release] invalid CODEKKO_RELEASE_REAL_SERVER_RETRIES=$REAL_SERVER_RETRIES (allowed: integer >= 1)" >&2
+  echo "[release] invalid CODEX_RUNTIME_RELEASE_REAL_SERVER_RETRIES=$REAL_SERVER_RETRIES (allowed: integer >= 1)" >&2
   exit 2
 fi
 
 case "$REAL_SERVER_BACKOFF_SEC" in
   ''|*[!0-9]*)
-    echo "[release] invalid CODEKKO_RELEASE_REAL_SERVER_BACKOFF_SEC=$REAL_SERVER_BACKOFF_SEC (allowed: non-negative integer)" >&2
+    echo "[release] invalid CODEX_RUNTIME_RELEASE_REAL_SERVER_BACKOFF_SEC=$REAL_SERVER_BACKOFF_SEC (allowed: non-negative integer)" >&2
     exit 2
     ;;
 esac
@@ -40,7 +40,7 @@ esac
 case "$REAL_SERVER_APPROVED" in
   0|1) ;;
   *)
-    echo "[release] invalid CODEKKO_REAL_SERVER_APPROVED=$REAL_SERVER_APPROVED (allowed: 0|1)" >&2
+    echo "[release] invalid CODEX_RUNTIME_REAL_SERVER_APPROVED=$REAL_SERVER_APPROVED (allowed: 0|1)" >&2
     exit 2
     ;;
 esac
@@ -90,7 +90,7 @@ cargo test --workspace
 
 if [[ "$INCLUDE_REAL_SERVER" == "1" ]]; then
   if [[ "$REAL_SERVER_APPROVED" != "1" ]]; then
-    echo "[release] refusing real-server gate: set CODEKKO_REAL_SERVER_APPROVED=1 after explicit operator approval" >&2
+    echo "[release] refusing real-server gate: set CODEX_RUNTIME_REAL_SERVER_APPROVED=1 after explicit operator approval" >&2
     exit 2
   fi
   echo "[release] gate: real-server contract"
@@ -99,7 +99,7 @@ if [[ "$INCLUDE_REAL_SERVER" == "1" ]]; then
     "$REAL_SERVER_BACKOFF_SEC" \
     "ergonomic::tests::real_server::"
 else
-  echo "[release] gate: real-server contract (skipped; set CODEKKO_RELEASE_INCLUDE_REAL_SERVER=1)"
+  echo "[release] gate: real-server contract (skipped; set CODEX_RUNTIME_RELEASE_INCLUDE_REAL_SERVER=1)"
 fi
 
 echo "[release] preflight passed"

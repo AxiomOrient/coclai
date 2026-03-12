@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-03-13
+
+### Fixed
+- web approval routing now preserves pending approvals for late subscribers and bounds replay by each session's configured approval capacity
+- pre-tool-use hook handling no longer starves dynamic tool-call or request-user-input server requests
+- automation stop now aborts in-flight runs instead of waiting indefinitely behind a stuck turn
+- non-Unix artifact lock recovery now treats unknown pid liveness as stale-by-age instead of permanently live
+
+### Changed
+- `runtime` re-exports now match the documented typed API surface
+- API reference now reflects the real `Session::ask_with(PromptRunParams)` contract and profile snapshot behavior
+
 ## [0.4.0] - 2026-03-11
 
 ### Changed

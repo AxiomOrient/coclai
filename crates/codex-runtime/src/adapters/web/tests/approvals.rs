@@ -74,3 +74,60 @@ async fn approval_roundtrip_via_post_approval() {
 
     runtime.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn late_subscriber_still_receives_pending_approval() {
+    let runtime = spawn_mock_runtime().await;
+    let adapter = WebAdapter::spawn(runtime.clone(), WebAdapterConfig::default())
+        .await
+        .expect("adapter spawn");
+
+    let session = adapter
+        .create_session(
+            "tenant_a",
+            CreateSessionRequest {
+                artifact_id: "doc:approval-late".to_owned(),
+                model: None,
+                thread_id: None,
+            },
+        )
+        .await
+        .expect("create session");
+
+    adapter
+        .create_turn(
+            "tenant_a",
+            &session.session_id,
+            CreateTurnRequest {
+                task: turn_task("need_approval"),
+            },
+        )
+        .await
+        .expect("create turn");
+
+    let mut approvals = adapter
+        .subscribe_session_approvals("tenant_a", &session.session_id)
+        .await
+        .expect("subscribe approvals");
+
+    let request = timeout(Duration::from_secs(2), approvals.recv())
+        .await
+        .expect("approval timeout")
+        .expect("approval channel closed");
+    assert_eq!(request.method, "item/fileChange/requestApproval");
+
+    adapter
+        .post_approval(
+            "tenant_a",
+            &session.session_id,
+            &request.approval_id,
+            ApprovalResponsePayload {
+                decision: Some(Value::String("accept".to_owned())),
+                result: None,
+            },
+        )
+        .await
+        .expect("post approval");
+
+    runtime.shutdown().await.expect("shutdown");
+}

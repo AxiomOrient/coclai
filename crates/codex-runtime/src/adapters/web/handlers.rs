@@ -54,7 +54,7 @@ pub(super) async fn route_server_request(state: &Arc<RwLock<WebState>>, request:
         return;
     };
 
-    let sender = {
+    let (sender, session_id, approval_queue_capacity) = {
         let mut guard = state.write().await;
         let Some(session_id) = guard.thread_to_session.get(&thread_id).cloned() else {
             guard.server_request_route_miss.missing_session_mapping = guard
@@ -72,6 +72,21 @@ pub(super) async fn route_server_request(state: &Arc<RwLock<WebState>>, request:
         guard
             .approval_to_session
             .insert(request.approval_id.clone(), session_id.clone());
+        let Some(approval_queue_capacity) = guard
+            .sessions
+            .get(&session_id)
+            .map(|session| session.approval_queue_capacity)
+        else {
+            guard.approval_to_session.remove(&request.approval_id);
+            tracing::warn!(
+                approval_id = %approval_id,
+                method = %method,
+                thread_id = %thread_id,
+                session_id = %session_id,
+                "dropping server request: session vanished from registry during approval routing"
+            );
+            return;
+        };
         let Some(sender) = guard.approval_topics.get(&session_id).cloned() else {
             guard.server_request_route_miss.missing_approval_topic = guard
                 .server_request_route_miss
@@ -87,15 +102,27 @@ pub(super) async fn route_server_request(state: &Arc<RwLock<WebState>>, request:
             );
             return;
         };
-        sender
+        (sender, session_id, approval_queue_capacity)
     };
-    if sender.send(request).is_err() {
-        tracing::warn!(
-            approval_id = %approval_id,
-            method = %method,
-            thread_id = %thread_id,
-            "dropping server request: approval topic receiver closed"
-        );
+    if sender.send(request.clone()).is_err() {
+        let mut guard = state.write().await;
+        let queue = guard.queued_approvals.entry(session_id).or_default();
+        if queue.len() < approval_queue_capacity {
+            queue.push(request);
+            tracing::warn!(
+                approval_id = %approval_id,
+                method = %method,
+                thread_id = %thread_id,
+                "queueing server request until an approval subscriber attaches"
+            );
+        } else {
+            tracing::warn!(
+                approval_id = %approval_id,
+                method = %method,
+                thread_id = %thread_id,
+                "dropping server request: queued approval limit reached"
+            );
+        }
     }
 }
 
@@ -111,6 +138,10 @@ pub(super) async fn prune_stale_approval_index(
     guard
         .approval_to_session
         .retain(|approval_id, _| active.contains(approval_id));
+    guard.queued_approvals.retain(|_, requests| {
+        requests.retain(|request| active.contains(&request.approval_id));
+        !requests.is_empty()
+    });
 }
 
 fn extract_thread_id_from_request(request: &ServerRequest) -> Option<String> {
@@ -336,10 +367,30 @@ pub(super) async fn subscribe_session_approvals(
     tenant_id: &str,
     session_id: &str,
 ) -> Result<broadcast::Receiver<ServerRequest>, WebError> {
-    subscribe_session_topic(state, tenant_id, session_id, |state, id| {
-        state.approval_topics.get(id).cloned()
-    })
-    .await
+    let _ = state::load_owned_session(state, tenant_id, session_id).await?;
+    let (sender, queued) = {
+        let mut guard = state.write().await;
+        let sender = guard
+            .approval_topics
+            .get(session_id)
+            .cloned()
+            .ok_or(WebError::InvalidSession)?;
+        let queued = guard
+            .queued_approvals
+            .remove(session_id)
+            .unwrap_or_default();
+        (sender, queued)
+    };
+
+    // Subscribe before replaying so the receiver observes all queued sends.
+    // No lag risk: queue.len() < approval_queue_capacity (the cap in route_server_request),
+    // and the broadcast channel was created with the same approval_queue_capacity, so the
+    // ring buffer can absorb all replayed items before this receiver falls behind.
+    let receiver = sender.subscribe();
+    for request in queued {
+        let _ = sender.send(request);
+    }
+    Ok(receiver)
 }
 
 async fn subscribe_session_topic<T: Clone>(
@@ -381,6 +432,10 @@ pub(super) async fn post_approval(
 
     let result = payload.into_result_payload()?;
     adapter.respond_approval_ok(approval_id, result).await?;
-    state.write().await.approval_to_session.remove(approval_id);
+    let mut guard = state.write().await;
+    guard.approval_to_session.remove(approval_id);
+    for requests in guard.queued_approvals.values_mut() {
+        requests.retain(|request| request.approval_id != approval_id);
+    }
     Ok(())
 }

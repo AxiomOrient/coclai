@@ -1,9 +1,6 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use thiserror::Error;
 
-use crate::runtime::api::{tool_use_hooks, PromptRunError, PromptRunParams, PromptRunResult};
+use crate::runtime::api::{PromptRunError, PromptRunParams, PromptRunResult};
 use crate::runtime::core::{Runtime, RuntimeConfig};
 #[cfg(test)]
 use crate::runtime::errors::RpcError;
@@ -27,7 +24,6 @@ use profile::{profile_to_prompt_params_with_hooks, session_thread_start_params};
 pub struct Client {
     runtime: Runtime,
     config: ClientConfig,
-    tool_use_loop_started: Arc<AtomicBool>,
 }
 
 impl Client {
@@ -63,17 +59,7 @@ impl Client {
             return Err(compatibility);
         }
 
-        // When pre-tool-use hooks are registered, start a background approval loop that
-        // intercepts commandExecution/fileChange approval requests and runs the hooks.
-        // The loop takes exclusive ownership of server_request_rx for the runtime's lifetime.
-        let tool_use_loop_started = Arc::new(AtomicBool::new(false));
-        let client = Self {
-            runtime,
-            config,
-            tool_use_loop_started,
-        };
-        client.ensure_tool_use_hook_loop(client.config.hooks.has_pre_tool_use_hooks());
-        Ok(client)
+        Ok(Self { runtime, config })
     }
 
     /// Run one prompt using default policies (approval=never, sandbox=read-only).
@@ -105,7 +91,6 @@ impl Client {
         profile: RunProfile,
     ) -> Result<PromptRunResult, PromptRunError> {
         let (params, hooks) = profile_to_prompt_params_with_hooks(cwd.into(), prompt, profile);
-        self.ensure_tool_use_hook_loop(hooks.has_pre_tool_use_hooks());
         self.runtime
             .run_prompt_with_hooks(params, Some(&hooks))
             .await
@@ -115,18 +100,12 @@ impl Client {
     /// Side effects: sends thread/start RPC call to app-server.
     /// Allocation: clones model/cwd/sandbox into thread-start payload. Complexity: O(n), n = total field sizes.
     pub async fn start_session(&self, config: SessionConfig) -> Result<Session, PromptRunError> {
-        self.ensure_tool_use_hook_loop(config.hooks.has_pre_tool_use_hooks());
         let thread = self
             .runtime
             .thread_start_with_hooks(session_thread_start_params(&config), Some(&config.hooks))
             .await?;
 
-        Ok(Session::new(
-            self.runtime.clone(),
-            thread.thread_id,
-            config,
-            Arc::clone(&self.tool_use_loop_started),
-        ))
+        Ok(Session::new(self.runtime.clone(), thread.thread_id, config))
     }
 
     /// Resume an existing session id with prepared defaults.
@@ -137,7 +116,6 @@ impl Client {
         thread_id: &str,
         config: SessionConfig,
     ) -> Result<Session, PromptRunError> {
-        self.ensure_tool_use_hook_loop(config.hooks.has_pre_tool_use_hooks());
         let thread = self
             .runtime
             .thread_resume_with_hooks(
@@ -147,12 +125,7 @@ impl Client {
             )
             .await?;
 
-        Ok(Session::new(
-            self.runtime.clone(),
-            thread.thread_id,
-            config,
-            Arc::clone(&self.tool_use_loop_started),
-        ))
+        Ok(Session::new(self.runtime.clone(), thread.thread_id, config))
     }
 
     /// Borrow underlying runtime for full low-level control.
@@ -171,21 +144,6 @@ impl Client {
     /// Side effects: closes channels and terminates child process.
     pub async fn shutdown(&self) -> Result<(), RuntimeError> {
         self.runtime.shutdown().await
-    }
-
-    fn ensure_tool_use_hook_loop(&self, needs_loop: bool) {
-        if !needs_loop {
-            return;
-        }
-        if self
-            .tool_use_loop_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            tokio::spawn(tool_use_hooks::run_tool_use_approval_loop(
-                self.runtime.clone(),
-            ));
-        }
     }
 }
 

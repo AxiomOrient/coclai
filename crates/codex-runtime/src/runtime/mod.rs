@@ -18,18 +18,20 @@ pub(crate) mod turn_lifecycle;
 pub mod turn_output;
 
 pub use api::{
-    ApprovalPolicy, CommandExecOutputDeltaNotification, CommandExecOutputStream, CommandExecParams,
-    CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
+    ApprovalPolicy, ByteRange, CommandExecOutputDeltaNotification, CommandExecOutputStream,
+    CommandExecParams, CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
     CommandExecTerminalSize, CommandExecTerminateParams, CommandExecTerminateResponse,
-    CommandExecWriteParams, CommandExecWriteResponse, Personality, PromptAttachment,
-    PromptRunError, PromptRunParams, PromptRunResult, ReasoningEffort, SandboxPolicy,
-    SandboxPreset, ServiceTier, SkillDependencies, SkillErrorInfo, SkillInterface, SkillMetadata,
-    SkillScope, SkillToolDependency, SkillsListEntry, SkillsListExtraRootsForCwd, SkillsListParams,
-    SkillsListResponse, ThreadAgentMessageItemView, ThreadCommandExecutionItemView,
+    CommandExecWriteParams, CommandExecWriteResponse, ExternalNetworkAccess, InputItem,
+    Personality, PromptAttachment, PromptRunError, PromptRunParams, PromptRunResult,
+    ReasoningEffort, SandboxPolicy, SandboxPreset, ServiceTier, SkillDependencies, SkillErrorInfo,
+    SkillInterface, SkillMetadata, SkillScope, SkillToolDependency, SkillsListEntry,
+    SkillsListExtraRootsForCwd, SkillsListParams, SkillsListResponse, TextElement,
+    ThreadAgentMessageItemView, ThreadCommandExecutionItemView, ThreadHandle,
     ThreadItemPayloadView, ThreadItemType, ThreadItemView, ThreadListParams, ThreadListResponse,
     ThreadListSortKey, ThreadLoadedListParams, ThreadLoadedListResponse, ThreadReadParams,
-    ThreadReadResponse, ThreadRollbackParams, ThreadRollbackResponse, ThreadTurnErrorView,
-    ThreadTurnStatus, ThreadTurnView, ThreadView, DEFAULT_REASONING_EFFORT,
+    ThreadReadResponse, ThreadRollbackParams, ThreadRollbackResponse, ThreadStartParams,
+    ThreadTurnErrorView, ThreadTurnStatus, ThreadTurnView, ThreadView, TurnHandle, TurnStartParams,
+    DEFAULT_REASONING_EFFORT,
 };
 pub use approvals::{ServerRequest, ServerRequestConfig, TimeoutAction};
 pub use client::{

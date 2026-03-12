@@ -276,17 +276,6 @@ impl Runtime {
             .clear_thread_scoped_pre_tool_use_hooks(thread_id);
     }
 
-    /// Run pre-tool-use hooks for one approval context.
-    /// Returns `Err(BlockReason)` to deny, `Ok(())` to approve.
-    /// Allocation: O(n) hook vec clone. Complexity: O(n), n = hook count.
-    pub(crate) async fn run_pre_tool_use_hooks(
-        &self,
-        ctx: &HookContext,
-        report: &mut HookReport,
-    ) -> Result<(), BlockReason> {
-        self.inner.hooks.run_pre_tool_use_with(ctx, report).await
-    }
-
     pub(crate) fn hooks_enabled_with(&self, scoped_hooks: Option<&RuntimeHookConfig>) -> bool {
         self.hooks_enabled() || scoped_hooks.is_some_and(|hooks| !hooks.is_empty())
     }

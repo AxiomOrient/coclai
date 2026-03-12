@@ -138,10 +138,10 @@ fn lock_owner_is_stale(path: &Path) -> bool {
 
     let now_unix_ms = now_unix_millis();
     let created_unix_ms = resolve_lock_created_unix_millis(path, &metadata);
-    let owner_status = if process_is_alive(metadata.pid) {
-        LockOwnerStatus::Alive
-    } else {
-        LockOwnerStatus::Dead
+    let owner_status = match process_is_alive(metadata.pid) {
+        Some(true) => LockOwnerStatus::Alive,
+        Some(false) => LockOwnerStatus::Dead,
+        None => LockOwnerStatus::Unknown,
     };
 
     should_reap_lock(
@@ -165,7 +165,7 @@ fn resolve_lock_created_unix_millis(path: &Path, metadata: &LockMetadata) -> Opt
 }
 
 #[cfg(unix)]
-fn process_is_alive(pid: u32) -> bool {
+fn process_is_alive(pid: u32) -> Option<bool> {
     let status = Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
@@ -173,14 +173,14 @@ fn process_is_alive(pid: u32) -> bool {
         .stderr(Stdio::null())
         .status();
     match status {
-        Ok(status) => status.success(),
-        Err(_) => true,
+        Ok(status) => Some(status.success()),
+        Err(_) => None,
     }
 }
 
 #[cfg(not(unix))]
-fn process_is_alive(_pid: u32) -> bool {
-    true
+fn process_is_alive(_pid: u32) -> Option<bool> {
+    None
 }
 
 fn now_unix_millis() -> u64 {
@@ -403,5 +403,34 @@ impl Drop for ArtifactLock {
     fn drop(&mut self) {
         let _ = self.file.sync_all();
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_pid_probe_falls_back_to_unknown_owner_status() {
+        assert_eq!(super::process_is_alive(123), None);
+        assert!(super::should_reap_lock(
+            super::LockOwnerStatus::Unknown,
+            Some(0),
+            super::LOCK_STALE_FALLBACK_AGE.as_millis() as u64 + 1,
+            super::LOCK_STALE_FALLBACK_AGE,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_pid_probe_returns_dead_for_nonexistent_process() {
+        // u32::MAX is not a valid PID on any unix system; kill -0 exits non-zero.
+        assert_eq!(super::process_is_alive(u32::MAX), Some(false));
+        // Dead owner status => reap immediately regardless of age.
+        assert!(super::should_reap_lock(
+            super::LockOwnerStatus::Dead,
+            Some(u64::MAX),
+            0,
+            super::LOCK_STALE_FALLBACK_AGE,
+        ));
     }
 }

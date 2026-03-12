@@ -23,6 +23,7 @@ pub(super) struct SessionRecord {
     pub(super) artifact_id: String,
     pub(super) thread_id: String,
     pub(super) lifecycle: SessionLifecycle,
+    pub(super) approval_queue_capacity: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub(super) struct WebState {
     pub(super) event_topics: HashMap<String, broadcast::Sender<Envelope>>,
     pub(super) approval_topics: HashMap<String, broadcast::Sender<ServerRequest>>,
     pub(super) approval_to_session: HashMap<String, String>,
+    pub(super) queued_approvals: HashMap<String, Vec<ServerRequest>>,
     pub(super) server_request_route_miss: ServerRequestRouteMissMetrics,
 }
 
@@ -78,6 +80,7 @@ pub(super) async fn register_session(
         artifact_id: artifact_id.to_owned(),
         thread_id: thread_id.to_owned(),
         lifecycle: SessionLifecycle::Active,
+        approval_queue_capacity: config.session_approval_channel_capacity,
     };
 
     let (event_tx, _) = broadcast::channel(config.session_event_channel_capacity);
@@ -151,6 +154,7 @@ pub(super) async fn finalize_close_owned_session(
     state.thread_to_session.remove(&session.thread_id);
     state.event_topics.remove(session_id);
     state.approval_topics.remove(session_id);
+    state.queued_approvals.remove(session_id);
     state
         .approval_to_session
         .retain(|_, owner_session_id| owner_session_id != session_id);

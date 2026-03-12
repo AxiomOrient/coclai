@@ -74,6 +74,16 @@ impl AutomationHandle {
     pub async fn stop(&self) {
         self.shared.stop_requested.store(true, Ordering::Release);
         self.shared.stop_notify.notify_waiters();
+        {
+            let mut status = self.shared.status.lock().await;
+            if !status.state.is_terminal() {
+                status.state = AutomationState::Stopped;
+                status.next_due_at = None;
+            }
+        }
+        if let Some(join) = self.join.lock().await.as_ref() {
+            join.abort();
+        }
     }
 
     pub async fn wait(self) -> AutomationStatus {
@@ -82,6 +92,10 @@ impl AutomationHandle {
             Some(join) => match join.await {
                 Ok(status) => status,
                 Err(err) => {
+                    let status = self.shared.snapshot().await;
+                    if err.is_cancelled() && status.state == AutomationState::Stopped {
+                        return status;
+                    }
                     let mut status = self.shared.snapshot().await;
                     status.state = AutomationState::Failed;
                     status.next_due_at = None;
@@ -490,8 +504,32 @@ mod tests {
         let status = handle.wait().await;
 
         assert_eq!(status.state, AutomationState::Stopped);
-        assert_eq!(status.runs_completed, 1);
+        assert_eq!(status.runs_completed, 0);
         assert_eq!(state.max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_aborts_in_flight_run_prompt() {
+        let state = Arc::new(FakeRunnerState::new(Duration::from_secs(60), vec![Ok(())]));
+        let handle = spawn_runner(
+            Arc::new(FakeRunner::new("thr_abort", Arc::clone(&state))),
+            AutomationSpec {
+                prompt: "block".to_owned(),
+                start_at: None,
+                every: Duration::from_millis(5),
+                stop_at: None,
+                max_runs: None,
+            },
+        );
+
+        state.first_run_started.notified().await;
+        handle.stop().await;
+        let status = tokio::time::timeout(Duration::from_secs(1), handle.wait())
+            .await
+            .expect("wait should not hang after stop");
+
+        assert_eq!(status.state, AutomationState::Stopped);
+        assert_eq!(status.runs_completed, 0);
     }
 
     #[tokio::test(flavor = "current_thread")]

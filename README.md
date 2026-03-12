@@ -24,7 +24,7 @@ It exposes six layers so you can start simple and reach deeper only when needed:
 Published crate dependency:
 ```toml
 [dependencies]
-codex-runtime = "0.4.0"
+codex-runtime = "0.5.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

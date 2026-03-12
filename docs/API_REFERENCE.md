@@ -106,7 +106,7 @@ Contract:
 - Hook issues are recorded in `HookReport` instead of silently discarded.
 - A pre-hook returning `HookAction::Mutate` can override prompt, model, and add attachments.
 - A pre-hook returning `HookAction::Block` stops the call before the next RPC boundary.
-- Tool-use hooks are routed through the internal approval loop and fire for approval-gated tool/file-change requests.
+- Tool-use hooks are evaluated inside runtime approval handling for approval-gated command/file-change requests.
 
 ### `codex_runtime::web`
 
@@ -368,9 +368,9 @@ Note: `cwd` can only be set at construction time. To change cwd, create a new `S
 Methods:
 - `is_closed()` — check whether the session has been closed
 - `ask(prompt)` — run one turn with session defaults
-- `ask_with(params)` — run one turn with explicit `TurnStartParams`
+- `ask_with(params)` — run one turn with explicit `PromptRunParams`
 - `ask_with_profile(prompt, profile)` — run one turn with a profile override
-- `profile()` — borrow the session config
+- `profile()` — return a `RunProfile` snapshot of the session defaults
 - `interrupt_turn(turn_id)` — interrupt the current turn
 - `close()` — archive thread and mark session closed
 

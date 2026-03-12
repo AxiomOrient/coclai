@@ -7,8 +7,10 @@ use serde_json::json;
 use tokio::time::{sleep, timeout};
 
 use super::*;
+use crate::plugin::{HookAction, HookContext, HookIssue, PreHook};
 use crate::runtime::errors::SinkError;
 use crate::runtime::events::MsgKind;
+use crate::runtime::hooks::RuntimeHookConfig;
 use crate::runtime::sink::EventSink;
 
 fn python_mock_process() -> StdioProcessSpec {
@@ -422,6 +424,27 @@ async fn spawn_mock_runtime_with_server_cfg(server_requests: ServerRequestConfig
     let mut cfg = RuntimeConfig::new(python_mock_process());
     cfg.server_requests = server_requests;
     Runtime::spawn_local(cfg).await.expect("runtime spawn")
+}
+
+async fn spawn_mock_runtime_with_hooks(hooks: RuntimeHookConfig) -> Runtime {
+    let cfg = RuntimeConfig::new(python_mock_process()).with_hooks(hooks);
+    Runtime::spawn_local(cfg).await.expect("runtime spawn")
+}
+
+#[derive(Clone)]
+struct TestPreToolUseHook;
+
+impl PreHook for TestPreToolUseHook {
+    fn name(&self) -> &'static str {
+        "test_pre_tool_use"
+    }
+
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a HookContext,
+    ) -> crate::plugin::HookFuture<'a, Result<HookAction, HookIssue>> {
+        Box::pin(async move { Ok(HookAction::Noop) })
+    }
 }
 
 async fn spawn_runtime_with_supervisor(
@@ -1168,6 +1191,54 @@ mod server_requests {
                 }
             }
             assert!(saw_ack);
+
+            runtime.shutdown().await.expect("shutdown");
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn pre_tool_use_hooks_do_not_consume_user_input_requests() {
+            let runtime = spawn_mock_runtime_with_hooks(
+                RuntimeHookConfig::new().with_pre_tool_use_hook(Arc::new(TestPreToolUseHook)),
+            )
+            .await;
+            let mut server_request_rx = runtime
+                .take_server_request_rx()
+                .await
+                .expect("take server request rx");
+
+            runtime
+                .call_raw("probe_user_input", json!({}))
+                .await
+                .expect("probe_user_input");
+            let req = timeout(Duration::from_secs(2), server_request_rx.recv())
+                .await
+                .expect("server request timeout")
+                .expect("server request closed");
+            assert_eq!(req.method, "item/tool/requestUserInput");
+
+            runtime.shutdown().await.expect("shutdown");
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn pre_tool_use_hooks_do_not_consume_dynamic_tool_call_requests() {
+            let runtime = spawn_mock_runtime_with_hooks(
+                RuntimeHookConfig::new().with_pre_tool_use_hook(Arc::new(TestPreToolUseHook)),
+            )
+            .await;
+            let mut server_request_rx = runtime
+                .take_server_request_rx()
+                .await
+                .expect("take server request rx");
+
+            runtime
+                .call_raw("probe_dynamic_tool_call", json!({}))
+                .await
+                .expect("probe_dynamic_tool_call");
+            let req = timeout(Duration::from_secs(2), server_request_rx.recv())
+                .await
+                .expect("server request timeout")
+                .expect("server request closed");
+            assert_eq!(req.method, "item/tool/call");
 
             runtime.shutdown().await.expect("shutdown");
         }

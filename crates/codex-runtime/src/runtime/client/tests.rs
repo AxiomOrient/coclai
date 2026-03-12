@@ -15,7 +15,7 @@ use crate::runtime::api::{
     ApprovalPolicy, PromptAttachment, ReasoningEffort, SandboxPolicy, SandboxPreset,
 };
 use crate::runtime::hooks::RuntimeHookConfig;
-use crate::runtime::InitializeCapabilities;
+use crate::runtime::{InitializeCapabilities, PromptRunParams};
 
 #[derive(Debug)]
 struct TempDir {
@@ -765,6 +765,43 @@ async fn session_ask_propagates_output_schema_to_turn_start() {
 
     session.close().await.expect("close");
     client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_ask_with_accepts_prompt_run_params() {
+    let (temp, client) =
+        connect_mock_client("runtime_client_session_ask_with", ClientConfig::new()).await;
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start session");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "result": {"type": "string"}
+        }
+    });
+
+    let out = session
+        .ask_with(
+            PromptRunParams::new(temp_cwd(&temp), "schema-session")
+                .with_output_schema(schema.clone()),
+        )
+        .await
+        .expect("ask_with");
+    let echoed: serde_json::Value =
+        serde_json::from_str(&out.assistant_text).expect("assistant text must echo schema");
+    assert_eq!(echoed, schema);
+
+    session.close().await.expect("close");
+    client.shutdown().await.expect("shutdown");
+}
+
+#[test]
+fn runtime_module_reexports_thread_types_documented_in_api_reference() {
+    let _thread_start = crate::runtime::ThreadStartParams::default();
+    let _turn_start = crate::runtime::TurnStartParams::default();
 }
 
 #[test]

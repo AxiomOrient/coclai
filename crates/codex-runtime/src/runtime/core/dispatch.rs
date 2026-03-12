@@ -1,11 +1,13 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use serde_json::json;
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration, MissedTickBehavior};
 use uuid::Uuid;
 
+use crate::plugin::{HookContext, HookPhase, HookReport};
 use crate::runtime::approvals::{
     route_server_request, ServerRequest, ServerRequestRoute, TimeoutAction,
 };
@@ -15,13 +17,14 @@ use crate::runtime::metrics::RuntimeMetrics;
 use crate::runtime::rpc::{extract_message_metadata, map_rpc_error};
 use crate::runtime::rpc_contract::methods;
 use crate::runtime::sink::EventSink;
+use crate::runtime::{api::tool_use_hooks, now_millis};
 
 use super::io_policy::{compute_deadline_millis, timeout_error_payload, timeout_result_payload};
 use super::rpc_io::resolve_transport_closed_pending;
 use super::state_projection::{
     state_apply_envelope, state_insert_pending_server_request, state_remove_pending_server_request,
 };
-use super::{now_millis, PendingServerRequestEntry, RuntimeInner};
+use super::{PendingServerRequestEntry, RuntimeInner};
 
 const APPROVAL_TIMEOUT_SWEEP_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -163,6 +166,11 @@ async fn queue_server_request(
     method: &str,
     params: Value,
 ) {
+    if let Some(result) = maybe_run_pre_tool_use_hooks(inner, method, &params).await {
+        let _ = send_rpc_result(inner, &rpc_id, result).await;
+        return;
+    }
+
     let approval_id = Uuid::new_v4().to_string();
     let now = now_millis();
     let deadline = compute_deadline_millis(now, inner.spec.server_request_cfg.default_timeout_ms);
@@ -215,6 +223,51 @@ async fn queue_server_request(
             }
         }
     }
+}
+
+async fn maybe_run_pre_tool_use_hooks(
+    inner: &Arc<RuntimeInner>,
+    method: &str,
+    params: &Value,
+) -> Option<Value> {
+    if !matches!(
+        method,
+        methods::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL
+            | methods::ITEM_FILE_CHANGE_REQUEST_APPROVAL
+    ) {
+        return None;
+    }
+    if !inner.hooks.has_pre_tool_use_hooks() {
+        return None;
+    }
+
+    let ctx = HookContext {
+        phase: HookPhase::PreToolUse,
+        thread_id: params
+            .get("threadId")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        turn_id: None,
+        cwd: None,
+        model: None,
+        main_status: None,
+        correlation_id: format!("tu-{}", Uuid::new_v4()),
+        ts_ms: now_millis(),
+        metadata: Value::Null,
+        tool_name: tool_use_hooks::extract_tool_name(method, params),
+        tool_input: tool_use_hooks::extract_tool_input(params),
+    };
+
+    let mut report = HookReport::default();
+    let decision = inner.hooks.run_pre_tool_use_with(&ctx, &mut report).await;
+    if !report.is_clean() {
+        inner.hooks.set_latest_report(report);
+    }
+
+    Some(match decision {
+        Ok(()) => json!({"decision": "accept"}),
+        Err(_) => json!({"decision": "decline"}),
+    })
 }
 
 /// Allocation: none in control path; sink-specific allocation happens in `on_envelope`.

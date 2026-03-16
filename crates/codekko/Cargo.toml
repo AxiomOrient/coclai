@@ -1,0 +1,25 @@
+[package]
+name = "codekko"
+version = "0.4.0"
+edition = "2021"
+description = "Ergonomic Rust wrapper for codex app-server with runtime safety and release gates."
+license = "MIT"
+repository = "https://github.com/AxiomOrient/codekko"
+readme = "../../README.md"
+keywords = ["codex", "ai", "llm", "automation", "cli"]
+categories = ["asynchronous", "api-bindings", "development-tools"]
+
+[dependencies]
+thiserror = "2"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+arc-swap.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+pretty_assertions = "1"

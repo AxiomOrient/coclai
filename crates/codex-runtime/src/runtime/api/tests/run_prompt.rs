@@ -24,6 +24,23 @@ struct CaptureCwdPreHook {
     cwd_values: Arc<Mutex<Vec<Option<String>>>>,
 }
 
+struct Lcg(u64);
+
+impl Lcg {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (self.0 >> 32) as u32
+    }
+
+    fn pick(&mut self, upper: usize) -> usize {
+        (self.next_u32() as usize) % upper
+    }
+}
+
 impl PreHook for CaptureCwdPreHook {
     fn name(&self) -> &'static str {
         "capture_cwd"
@@ -485,6 +502,99 @@ async fn run_prompt_preserves_explicit_effort() {
     assert_eq!(result.assistant_text, "high");
 
     runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn randomized_user_like_prompt_paths_remain_stable() {
+    let mut rng = Lcg::new(0xC0DE_600D_5EED_u64);
+    let efforts = [
+        (ReasoningEffort::Low, "low"),
+        (ReasoningEffort::Medium, "medium"),
+        (ReasoningEffort::High, "high"),
+        (ReasoningEffort::XHigh, "xhigh"),
+    ];
+
+    for iteration in 0..32 {
+        let scenario = rng.pick(5);
+        let runtime = match scenario {
+            3 => spawn_run_prompt_cross_thread_noise_runtime().await,
+            4 => spawn_run_prompt_effort_probe_runtime().await,
+            _ => spawn_run_prompt_runtime().await,
+        };
+        let cwd = format!("/tmp/random-user-{iteration}/cwd-{}", rng.pick(11));
+        let prompt = format!(
+            "user={} action={} payload={}",
+            rng.pick(17),
+            scenario,
+            rng.next_u32()
+        );
+
+        let result = match scenario {
+            0 => runtime
+                .run_prompt_simple(&cwd, &prompt)
+                .await
+                .expect("simple prompt must succeed"),
+            1 => runtime
+                .run_prompt(PromptRunParams {
+                    cwd: cwd.clone(),
+                    prompt: prompt.clone(),
+                    model: Some(format!("gpt-5-codex-{}", rng.pick(3))),
+                    effort: Some(efforts[rng.pick(efforts.len())].0),
+                    approval_policy: ApprovalPolicy::Never,
+                    sandbox_policy: SandboxPolicy::Preset(SandboxPreset::ReadOnly),
+                    privileged_escalation_approved: false,
+                    attachments: vec![],
+                    timeout: Duration::from_secs(2),
+                    output_schema: None,
+                })
+                .await
+                .expect("full prompt must succeed"),
+            2 => runtime
+                .run_prompt_in_thread("thr_existing", PromptRunParams::new(&cwd, &prompt))
+                .await
+                .expect("in-thread prompt must succeed"),
+            3 => runtime
+                .run_prompt(PromptRunParams::new(&cwd, &prompt))
+                .await
+                .expect("cross-thread noise prompt must succeed"),
+            4 => {
+                let expected = efforts[rng.pick(efforts.len())];
+                let result = runtime
+                    .run_prompt(PromptRunParams {
+                        cwd: cwd.clone(),
+                        prompt: prompt.clone(),
+                        model: Some("gpt-5-codex".to_owned()),
+                        effort: Some(expected.0),
+                        approval_policy: ApprovalPolicy::Never,
+                        sandbox_policy: SandboxPolicy::Preset(SandboxPreset::ReadOnly),
+                        privileged_escalation_approved: false,
+                        attachments: vec![],
+                        timeout: Duration::from_secs(2),
+                        output_schema: None,
+                    })
+                    .await
+                    .expect("effort probe prompt must succeed");
+                assert_eq!(result.assistant_text, expected.1);
+                result
+            }
+            _ => unreachable!("scenario is bounded"),
+        };
+
+        match scenario {
+            2 => assert_eq!(result.thread_id, "thr_existing"),
+            4 => assert_eq!(result.thread_id, "thr_effort_probe"),
+            _ => assert_eq!(result.thread_id, "thr_prompt"),
+        }
+        match scenario {
+            4 => assert_eq!(result.turn_id, "turn_effort_probe"),
+            _ => assert_eq!(result.turn_id, "turn_prompt"),
+        }
+        if scenario != 4 {
+            assert_eq!(result.assistant_text, "ok-from-run-prompt");
+        }
+
+        runtime.shutdown().await.expect("shutdown");
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

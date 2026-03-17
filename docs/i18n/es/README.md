@@ -4,8 +4,8 @@
 
 Enlaces rapidos:
 - README principal en ingles: [`../../../README.md`](../../../README.md)
+- Especificacion canonica del repositorio: [`../../../SPEC.md`](../../../SPEC.md)
 - Referencia de API: [`../../API_REFERENCE.md`](../../API_REFERENCE.md)
-- Auditoria de renombre y publicacion del crate: [`../../CRATE_RENAME_AUDIT.md`](../../CRATE_RENAME_AUDIT.md)
 - Indice de documentacion activa: [`../../README.md`](../../README.md)
 
 Resumen:

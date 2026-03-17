@@ -4,8 +4,8 @@
 
 빠른 이동:
 - 영문 루트 README: [`../../../README.md`](../../../README.md)
+- 저장소 기준 문서: [`../../../SPEC.md`](../../../SPEC.md)
 - API 기준 문서: [`../../API_REFERENCE.md`](../../API_REFERENCE.md)
-- 크레이트 이름 전환 및 배포 감사: [`../../CRATE_RENAME_AUDIT.md`](../../CRATE_RENAME_AUDIT.md)
 - 활성 문서 인덱스: [`../../README.md`](../../README.md)
 
 현재 상태 요약:

@@ -26,6 +26,19 @@ Choose the narrowest surface that solves the job.
 | 5 | `AppServer` | Thin JSON-RPC facade with validated request helpers and server-request loop access |
 | 6 | `runtime::Runtime` + raw JSON-RPC | Full runtime control, live events, raw/validated RPC; raw mode for experimental or custom methods |
 
+## Packaging Model And Consumer Profiles
+
+- `codex-runtime` ships as **one repository** and **one published crate** in v1.
+- `web` and `artifact` are **built-in higher-order modules** in the default crate surface.
+- `quick_run`, `Workflow`, and `automation` are convenience layers above the substrate core.
+- `AxiomRunner` should use the **core substrate surface** as its canonical bridge:
+  - prefer `runtime::{Client, Session, ClientConfig, SessionConfig, RunProfile}`
+  - prefer `runtime::{PromptRunParams, PromptRunResult, PromptRunError}`
+  - prefer `runtime::{ServerRequest, ServerRequestConfig}`
+  - use `AppServer` / `rpc_methods` only when validated low-level parity is required
+- `AxiomRunner` should **not** treat `quick_run`, `Workflow`, `automation`, `web`, or `artifact`
+  as its primary integration surface.
+
 ## Public Surface Map
 
 ### Root crate (`codex_runtime`)
@@ -41,8 +54,8 @@ Choose the narrowest surface that solves the job.
 - `automation::{spawn, AutomationHandle, AutomationSpec, AutomationState, AutomationStatus}`
 - `AppServer`
 - `rpc_methods` (re-export of `runtime::rpc_contract::methods`)
-- `web` (optional)
-- `artifact` (optional)
+- `web`
+- `artifact`
 - `plugin`
 - `runtime`
 
@@ -110,6 +123,8 @@ Contract:
 
 ### `codex_runtime::web`
 
+Status: built-in higher-order module in the default crate surface.
+
 Primary types:
 - `WebAdapter`, `WebAdapterConfig`
 - `RuntimeWebAdapter`, `WebPluginAdapter`, `WebRuntimeStreams`
@@ -137,6 +152,8 @@ Contract:
 - Approval responses are posted back through the adapter, not by mutating runtime state directly.
 
 ### `codex_runtime::artifact`
+
+Status: built-in higher-order module in the default crate surface.
 
 Primary types:
 - `ArtifactSessionManager`

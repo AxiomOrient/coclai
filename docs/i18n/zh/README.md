@@ -4,8 +4,8 @@
 
 快速链接：
 - 英文根 README：[`../../../README.md`](../../../README.md)
+- 仓库标准说明：[`../../../SPEC.md`](../../../SPEC.md)
 - API 参考：[`../../API_REFERENCE.md`](../../API_REFERENCE.md)
-- crate 改名与发布审计：[`../../CRATE_RENAME_AUDIT.md`](../../CRATE_RENAME_AUDIT.md)
 - 当前文档索引：[`../../README.md`](../../README.md)
 
 当前摘要：

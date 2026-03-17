@@ -17,6 +17,19 @@ It exposes six layers so you can start simple and reach deeper only when needed:
 | 5 | `AppServer` | Direct JSON-RPC with typed helpers and server-request loop |
 | 6 | `runtime::Runtime` or raw JSON-RPC | Full control, live events, experimental access |
 
+## Repository Contract
+
+`codex-runtime` keeps one simple package model in v1:
+
+- one repository
+- one published crate
+- one canonical repository spec: [`SPEC.md`](SPEC.md)
+- `web` and `artifact` ship as built-in higher-order modules in the default crate
+- `quick_run`, `Workflow`, and `automation` stay convenience layers above the substrate core
+
+For AxiomRunner integration, the canonical worker bridge should stay on the core substrate
+surface (`runtime::{Client, Session, ClientConfig, SessionConfig, RunProfile, PromptRunParams, PromptRunResult, PromptRunError, ServerRequest, ServerRequestConfig}`), with `AppServer` / `rpc_methods` used only when validated low-level parity is needed.
+
 ## Install
 
 **Requires:** `codex` CLI >= 0.104.0 installed and available on `$PATH`.
@@ -24,7 +37,7 @@ It exposes six layers so you can start simple and reach deeper only when needed:
 Published crate dependency:
 ```toml
 [dependencies]
-codex-runtime = "0.5.0"
+codex-runtime = "0.6.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -191,12 +204,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Module | Role |
 |--------|------|
-| `codex_runtime` | Root: `quick_run`, `Workflow`, `WorkflowConfig`, `AppServer`, `rpc_methods`, `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, `ShellCommandHook` |
-| `codex_runtime::automation` | Optional session-scoped recurring prompt runner above one prepared `Session` |
-| `codex_runtime::runtime` | Low-level runtime: `Client`, `Session`, `Runtime`, typed models, errors |
-| `codex_runtime::plugin` | Hook extension point: `PreHook`, `PostHook`, `HookContext`, `HookPatch` |
-| `codex_runtime::web` | Optional HTTP adapter bridging runtime sessions to SSE/REST web services |
-| `codex_runtime::artifact` | Optional artifact tracking domain built on top of the runtime |
+| `codex_runtime` | Root convenience + core exports: `quick_run`, `Workflow`, `WorkflowConfig`, `AppServer`, `rpc_methods`, `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, `ShellCommandHook` |
+| `codex_runtime::automation` | Convenience session-scoped recurring prompt runner above one prepared `Session` |
+| `codex_runtime::runtime` | Foundation core runtime: `Client`, `Session`, `Runtime`, typed models, approvals, transport, errors |
+| `codex_runtime::plugin` | Foundation core hook extension point: `PreHook`, `PostHook`, `HookContext`, `HookPatch` |
+| `codex_runtime::web` | Built-in higher-order web bridge over runtime sessions, approvals, and SSE/REST delivery |
+| `codex_runtime::artifact` | Built-in higher-order artifact domain over runtime threads and artifact stores |
 
 Important runtime submodules available for direct use when re-exports are not enough:
 `runtime::api`, `runtime::approvals`, `runtime::client`, `runtime::core`,
@@ -204,7 +217,7 @@ Important runtime submodules available for direct use when re-exports are not en
 `runtime::rpc`, `runtime::rpc_contract`, `runtime::sink`, `runtime::state`,
 `runtime::transport`, `runtime::turn_output`
 
-## Optional Modules
+## Built-in Higher-Order Modules
 
 ### `codex_runtime::web`
 
@@ -281,9 +294,9 @@ Important contract:
 
 ## Documentation
 
+- [SPEC.md](SPEC.md): canonical repository-level substrate contract, packaging model, and AxiomRunner consumer profile
 - [docs/README.md](docs/README.md): active documentation index
 - [API_REFERENCE.md](docs/API_REFERENCE.md): full public API surface, typed payload contracts, validation and security rules
-- [CRATE_RENAME_AUDIT.md](docs/CRATE_RENAME_AUDIT.md): rename verification status and remaining caveats
 - [TEST_TREE.md](docs/TEST_TREE.md): test layer structure and live-gate boundary
 - [BACKLOG.md](docs/BACKLOG.md): non-blocking follow-up improvements
 - [CHANGELOG.md](CHANGELOG.md): release history

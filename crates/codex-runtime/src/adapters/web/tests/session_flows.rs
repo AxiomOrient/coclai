@@ -1,5 +1,22 @@
 use super::*;
 
+struct Lcg(u64);
+
+impl Lcg {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (self.0 >> 32) as u32
+    }
+
+    fn pick(&mut self, upper: usize) -> usize {
+        (self.next_u32() as usize) % upper
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn sessions_turns_and_events_are_isolated() {
     let runtime = spawn_mock_runtime().await;
@@ -68,6 +85,94 @@ async fn sessions_turns_and_events_are_isolated() {
         Duration::from_millis(250),
     )
     .await;
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn randomized_multi_tenant_session_turn_stress_preserves_isolation() {
+    let runtime = spawn_mock_runtime().await;
+    let adapter = WebAdapter::spawn(runtime.clone(), WebAdapterConfig::default())
+        .await
+        .expect("adapter spawn");
+    let mut rng = Lcg::new(0x5E55_10A5_u64);
+    let tenants = ["tenant_a", "tenant_b"];
+    let mut sessions = Vec::new();
+    let mut streams = Vec::new();
+
+    for idx in 0..6 {
+        let tenant = tenants[idx % tenants.len()];
+        let session = adapter
+            .create_session(
+                tenant,
+                CreateSessionRequest {
+                    artifact_id: format!("doc:{tenant}:{idx}"),
+                    model: None,
+                    thread_id: None,
+                },
+            )
+            .await
+            .expect("seed session");
+        let stream = adapter
+            .subscribe_session_events(tenant, &session.session_id)
+            .await
+            .expect("event stream");
+        sessions.push((tenant.to_owned(), session));
+        streams.push(stream);
+    }
+
+    for step in 0..40 {
+        let target_idx = rng.pick(sessions.len());
+        let (tenant, session) = &sessions[target_idx];
+        let task_text = if rng.pick(5) == 0 {
+            "need_approval".to_owned()
+        } else {
+            format!("user:{} step:{} seed:{}", target_idx, step, rng.next_u32())
+        };
+        adapter
+            .create_turn(
+                tenant,
+                &session.session_id,
+                CreateTurnRequest {
+                    task: turn_task(&task_text),
+                },
+            )
+            .await
+            .expect("turn start");
+
+        let completed = wait_turn_completed(&mut streams[target_idx], &session.thread_id).await;
+        assert_eq!(
+            completed.thread_id.as_deref(),
+            Some(session.thread_id.as_str())
+        );
+
+        let other_idx = (target_idx + 1 + rng.pick(sessions.len() - 1)) % sessions.len();
+        let other_thread = sessions[other_idx].1.thread_id.clone();
+        assert_no_thread_leak(
+            &mut streams[other_idx],
+            &session.thread_id,
+            Duration::from_millis(120),
+        )
+        .await;
+        assert_ne!(other_thread, session.thread_id);
+
+        let wrong_tenant = if tenant == "tenant_a" {
+            "tenant_b"
+        } else {
+            "tenant_a"
+        };
+        let err = adapter
+            .create_turn(
+                wrong_tenant,
+                &session.session_id,
+                CreateTurnRequest {
+                    task: turn_task("cross-tenant-must-fail"),
+                },
+            )
+            .await
+            .expect_err("cross-tenant turn must fail");
+        assert_eq!(err, WebError::Forbidden);
+    }
 
     runtime.shutdown().await.expect("shutdown");
 }

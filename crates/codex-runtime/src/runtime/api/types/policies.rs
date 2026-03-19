@@ -78,10 +78,6 @@ impl FromStr for ApprovalPolicy {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReasoningEffort {
-    #[serde(rename = "none")]
-    None,
-    #[serde(rename = "minimal")]
-    Minimal,
     #[serde(rename = "low")]
     Low,
     #[serde(rename = "medium")]
@@ -95,8 +91,6 @@ pub enum ReasoningEffort {
 impl ReasoningEffort {
     pub fn as_wire(self) -> &'static str {
         match self {
-            Self::None => "none",
-            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -112,8 +106,6 @@ impl FromStr for ReasoningEffort {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "none" => Ok(Self::None),
-            "minimal" => Ok(Self::Minimal),
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
@@ -172,9 +164,6 @@ const SANDBOX_POLICY_TYPE_READ_ONLY: &str = "readOnly";
 const SANDBOX_POLICY_TYPE_WORKSPACE_WRITE: &str = "workspaceWrite";
 const SANDBOX_POLICY_TYPE_DANGER_FULL_ACCESS: &str = "dangerFullAccess";
 const SANDBOX_POLICY_TYPE_EXTERNAL_SANDBOX: &str = "externalSandbox";
-const SANDBOX_MODE_READ_ONLY: &str = "read-only";
-const SANDBOX_MODE_WORKSPACE_WRITE: &str = "workspace-write";
-const SANDBOX_MODE_DANGER_FULL_ACCESS: &str = "danger-full-access";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SandboxPolicyKind {
@@ -231,15 +220,6 @@ pub(crate) fn sandbox_policy_to_wire_value(policy: &SandboxPolicy) -> Value {
     }
 }
 
-pub(crate) fn sandbox_mode_to_wire_value(policy: &SandboxPolicy) -> Value {
-    match policy {
-        SandboxPolicy::Preset(preset) => Value::String(sandbox_mode_from_preset(preset).to_owned()),
-        SandboxPolicy::Raw(value) => {
-            sandbox_mode_from_raw_value(value).unwrap_or_else(|| value.clone())
-        }
-    }
-}
-
 fn summarize_sandbox_preset(preset: &SandboxPreset) -> SandboxPolicySummary {
     match preset {
         SandboxPreset::ReadOnly => SandboxPolicySummary {
@@ -281,42 +261,6 @@ fn sandbox_policy_kind_from_wire(policy_type: &str) -> SandboxPolicyKind {
         SANDBOX_POLICY_TYPE_DANGER_FULL_ACCESS => SandboxPolicyKind::DangerFullAccess,
         SANDBOX_POLICY_TYPE_EXTERNAL_SANDBOX => SandboxPolicyKind::ExternalSandbox,
         _ => SandboxPolicyKind::Unknown,
-    }
-}
-
-fn sandbox_mode_from_preset(preset: &SandboxPreset) -> &'static str {
-    match preset {
-        SandboxPreset::ReadOnly => SANDBOX_MODE_READ_ONLY,
-        SandboxPreset::WorkspaceWrite { .. } => SANDBOX_MODE_WORKSPACE_WRITE,
-        SandboxPreset::DangerFullAccess => SANDBOX_MODE_DANGER_FULL_ACCESS,
-        SandboxPreset::ExternalSandbox { .. } => SANDBOX_MODE_WORKSPACE_WRITE,
-    }
-}
-
-fn sandbox_mode_from_raw_value(value: &Value) -> Option<Value> {
-    match value {
-        Value::String(mode) => Some(Value::String(
-            normalize_sandbox_mode_alias(mode)?.to_owned(),
-        )),
-        Value::Object(obj) => obj
-            .get("type")
-            .and_then(Value::as_str)
-            .and_then(normalize_sandbox_mode_alias)
-            .map(|mode| Value::String(mode.to_owned())),
-        _ => None,
-    }
-}
-
-pub(crate) fn normalize_sandbox_mode_alias(value: &str) -> Option<&'static str> {
-    match value.trim() {
-        SANDBOX_MODE_READ_ONLY | SANDBOX_POLICY_TYPE_READ_ONLY => Some(SANDBOX_MODE_READ_ONLY),
-        SANDBOX_MODE_WORKSPACE_WRITE | SANDBOX_POLICY_TYPE_WORKSPACE_WRITE => {
-            Some(SANDBOX_MODE_WORKSPACE_WRITE)
-        }
-        SANDBOX_MODE_DANGER_FULL_ACCESS | SANDBOX_POLICY_TYPE_DANGER_FULL_ACCESS => {
-            Some(SANDBOX_MODE_DANGER_FULL_ACCESS)
-        }
-        _ => None,
     }
 }
 
@@ -433,15 +377,5 @@ mod tests {
         .expect("legacy workspaceWrite must still classify");
         assert!(workspace_write.is_privileged());
         assert!(workspace_write.has_non_empty_writable_roots());
-    }
-
-    #[test]
-    fn sandbox_mode_to_wire_value_emits_string_mode_for_thread_surfaces() {
-        let preset = sandbox_mode_to_wire_value(&SandboxPolicy::Preset(SandboxPreset::ReadOnly));
-        assert_eq!(preset, Value::String("read-only".to_owned()));
-
-        let raw_object =
-            sandbox_mode_to_wire_value(&SandboxPolicy::Raw(json!({"type":"workspaceWrite"})));
-        assert_eq!(raw_object, Value::String("workspace-write".to_owned()));
     }
 }

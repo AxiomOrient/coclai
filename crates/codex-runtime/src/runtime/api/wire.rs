@@ -5,9 +5,9 @@ use crate::runtime::errors::RpcError;
 use crate::runtime::rpc_contract::payload_summary;
 
 use super::{
-    sandbox_mode_to_wire_value, sandbox_policy_to_wire_value, summarize_sandbox_policy,
-    ApprovalPolicy, ByteRange, CommandExecParams, InputItem, PromptAttachment, TextElement,
-    ThreadStartParams, TurnStartParams,
+    sandbox_policy_to_wire_value, summarize_sandbox_policy, ApprovalPolicy, ByteRange,
+    CommandExecParams, InputItem, PromptAttachment, TextElement, ThreadStartParams,
+    TurnStartParams,
 };
 
 pub(super) fn serialize_params<T: Serialize>(method: &str, params: &T) -> Result<Value, RpcError> {
@@ -159,10 +159,11 @@ fn insert_thread_common_overrides(params: &mut Map<String, Value>, p: &ThreadSta
             Value::String(approval_policy.as_wire().to_owned()),
         );
     }
+    insert_privileged_escalation_approved(params, p.privileged_escalation_approved);
     if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
         params.insert(
-            "sandbox".to_owned(),
-            sandbox_mode_to_wire_value(sandbox_policy),
+            "sandboxPolicy".to_owned(),
+            sandbox_policy_to_wire_value(sandbox_policy),
         );
     }
     if let Some(config) = p.config.as_ref() {
@@ -208,6 +209,7 @@ pub(super) fn turn_start_params_to_wire(thread_id: &str, p: &TurnStartParams) ->
             Value::String(approval_policy.as_wire().to_owned()),
         );
     }
+    insert_privileged_escalation_approved(&mut params, p.privileged_escalation_approved);
     if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
         params.insert(
             "sandboxPolicy".to_owned(),
@@ -457,6 +459,12 @@ fn text_element_to_wire(element: &TextElement) -> Value {
         obj.insert("placeholder".to_owned(), Value::String(placeholder.clone()));
     }
     Value::Object(obj)
+}
+
+fn insert_privileged_escalation_approved(params: &mut Map<String, Value>, approved: bool) {
+    if approved {
+        params.insert("privilegedEscalationApproved".to_owned(), Value::Bool(true));
+    }
 }
 
 // ── Prompt → thread/turn param transformations ────────────────────────────

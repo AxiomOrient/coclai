@@ -170,7 +170,7 @@ async fn shell_pre_and_post_hook_attempt() -> Result<(), String> {
         );
 
         let config = WorkflowConfig::new(cwd)
-            .with_timeout(Duration::from_secs(300))
+            .with_run_profile(RunProfile::new().with_timeout(Duration::from_secs(300)))
             .with_global_pre_hook(Arc::new(
                 ShellCommandHook::new("live-pre", pre_command)
                     .with_env("HOOK_LOG", pre_log.display().to_string()),
@@ -365,7 +365,8 @@ async fn quick_run_with_profile_attempt(
 
 async fn workflow_run_attempt(cwd: String) -> Result<PromptRunResult, String> {
     tokio::time::timeout(WORKFLOW_RUN_ATTEMPT_TIMEOUT, async move {
-        let config = WorkflowConfig::new(cwd).with_timeout(Duration::from_secs(120));
+        let config = WorkflowConfig::new(cwd)
+            .with_run_profile(RunProfile::new().with_timeout(Duration::from_secs(120)));
         let workflow = Workflow::connect(config)
             .await
             .map_err(|err| format!("workflow connect with real codex server failed: {err}"))?;
@@ -400,7 +401,8 @@ async fn workflow_session_memory_attempt(
     token: &'static str,
 ) -> Result<PromptRunResult, String> {
     tokio::time::timeout(SESSION_RUN_ATTEMPT_TIMEOUT, async move {
-        let config = WorkflowConfig::new(cwd).with_timeout(Duration::from_secs(120));
+        let config = WorkflowConfig::new(cwd)
+            .with_run_profile(RunProfile::new().with_timeout(Duration::from_secs(120)));
         let workflow = Workflow::connect(config)
             .await
             .map_err(|err| format!("workflow connect with real codex server failed: {err}"))?;

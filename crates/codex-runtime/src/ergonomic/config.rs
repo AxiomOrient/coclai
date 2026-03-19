@@ -2,12 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::Value;
-
 use crate::plugin::{PostHook, PreHook};
 use crate::runtime::{
-    ApprovalPolicy, ClientConfig, CompatibilityGuard, InitializeCapabilities, PromptAttachment,
-    ReasoningEffort, RunProfile, RuntimeHookConfig, SandboxPolicy, SessionConfig, ShellCommandHook,
+    ClientConfig, CompatibilityGuard, InitializeCapabilities, RunProfile, RuntimeHookConfig,
+    SessionConfig, ShellCommandHook,
 };
 
 use crate::ergonomic::paths::absolutize_cwd_without_fs_checks;
@@ -106,102 +104,6 @@ impl WorkflowConfig {
     /// Allocation: amortized O(1) push. Complexity: O(1).
     pub fn with_global_pre_tool_use_hook(mut self, hook: Arc<dyn PreHook>) -> Self {
         self.client_config = self.client_config.with_pre_tool_use_hook(hook);
-        self
-    }
-
-    /// Set explicit model override.
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.run_profile = self.run_profile.with_model(model);
-        self
-    }
-
-    /// Set explicit reasoning effort.
-    pub fn with_effort(mut self, effort: ReasoningEffort) -> Self {
-        self.run_profile = self.run_profile.with_effort(effort);
-        self
-    }
-
-    /// Set approval policy override.
-    pub fn with_approval_policy(mut self, approval_policy: ApprovalPolicy) -> Self {
-        self.run_profile = self.run_profile.with_approval_policy(approval_policy);
-        self
-    }
-
-    /// Set sandbox policy override.
-    pub fn with_sandbox_policy(mut self, sandbox_policy: SandboxPolicy) -> Self {
-        self.run_profile = self.run_profile.with_sandbox_policy(sandbox_policy);
-        self
-    }
-
-    /// Set prompt timeout.
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.run_profile = self.run_profile.with_timeout(timeout);
-        self
-    }
-
-    /// Set one optional JSON Schema for the final assistant message.
-    pub fn with_output_schema(mut self, output_schema: Value) -> Self {
-        self.run_profile = self.run_profile.with_output_schema(output_schema);
-        self
-    }
-
-    /// Add one attachment.
-    pub fn with_attachment(mut self, attachment: PromptAttachment) -> Self {
-        self.run_profile = self.run_profile.with_attachment(attachment);
-        self
-    }
-
-    /// Add one `@path` attachment.
-    pub fn attach_path(mut self, path: impl Into<String>) -> Self {
-        self.run_profile = self.run_profile.attach_path(path);
-        self
-    }
-
-    /// Add one `@path` attachment with placeholder.
-    pub fn attach_path_with_placeholder(
-        mut self,
-        path: impl Into<String>,
-        placeholder: impl Into<String>,
-    ) -> Self {
-        self.run_profile = self
-            .run_profile
-            .attach_path_with_placeholder(path, placeholder);
-        self
-    }
-
-    /// Add one remote image attachment.
-    pub fn attach_image_url(mut self, url: impl Into<String>) -> Self {
-        self.run_profile = self.run_profile.attach_image_url(url);
-        self
-    }
-
-    /// Add one local image attachment.
-    pub fn attach_local_image(mut self, path: impl Into<String>) -> Self {
-        self.run_profile = self.run_profile.attach_local_image(path);
-        self
-    }
-
-    /// Add one skill attachment.
-    pub fn attach_skill(mut self, name: impl Into<String>, path: impl Into<String>) -> Self {
-        self.run_profile = self.run_profile.attach_skill(name, path);
-        self
-    }
-
-    /// Replace run-level hooks.
-    pub fn with_run_hooks(mut self, hooks: RuntimeHookConfig) -> Self {
-        self.run_profile = self.run_profile.with_hooks(hooks);
-        self
-    }
-
-    /// Register one run-level pre hook.
-    pub fn with_run_pre_hook(mut self, hook: Arc<dyn PreHook>) -> Self {
-        self.run_profile = self.run_profile.with_pre_hook(hook);
-        self
-    }
-
-    /// Register one run-level post hook.
-    pub fn with_run_post_hook(mut self, hook: Arc<dyn PostHook>) -> Self {
-        self.run_profile = self.run_profile.with_post_hook(hook);
         self
     }
 

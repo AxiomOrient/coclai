@@ -33,63 +33,106 @@ pub(super) fn deserialize_result<T: DeserializeOwned>(
 /// 2) non-never approval policy
 /// 3) explicit execution scope (`cwd` or writable roots)
 pub(super) fn validate_thread_start_security(p: &ThreadStartParams) -> Result<(), RpcError> {
-    let Some(sandbox_policy) = p.sandbox_policy.as_ref() else {
-        return Ok(());
-    };
-    let policy_summary =
-        summarize_sandbox_policy(sandbox_policy).map_err(RpcError::InvalidRequest)?;
-    if !policy_summary.is_privileged() {
-        return Ok(());
-    }
-    if !p.privileged_escalation_approved {
-        return Err(RpcError::InvalidRequest(
-            "privileged sandbox requires explicit escalation approval".to_owned(),
-        ));
-    }
-    let approval = p.approval_policy.unwrap_or(ApprovalPolicy::Never);
-    if approval == ApprovalPolicy::Never {
-        return Err(RpcError::InvalidRequest(
-            "privileged sandbox requires non-never approval policy".to_owned(),
-        ));
-    }
-    if !has_explicit_scope(
+    validate_privileged_sandbox_security(
+        p.sandbox_policy.as_ref(),
+        p.privileged_escalation_approved,
+        p.approval_policy,
         p.cwd.as_deref(),
-        policy_summary.has_non_empty_writable_roots(),
-    ) {
-        return Err(RpcError::InvalidRequest(
-            "privileged sandbox requires explicit scope via cwd or writable roots".to_owned(),
-        ));
-    }
-    Ok(())
+    )
 }
 
 /// Enforce privileged sandbox escalation policy (SEC-004) for turn/start.
 pub(super) fn validate_turn_start_security(p: &TurnStartParams) -> Result<(), RpcError> {
-    let Some(sandbox_policy) = p.sandbox_policy.as_ref() else {
+    validate_privileged_sandbox_security(
+        p.sandbox_policy.as_ref(),
+        p.privileged_escalation_approved,
+        p.approval_policy,
+        p.cwd.as_deref(),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivilegedSandboxViolation {
+    ExplicitApprovalRequired,
+    NonNeverApprovalPolicyRequired,
+    ExplicitScopeRequired,
+}
+
+impl PrivilegedSandboxViolation {
+    fn message(self) -> &'static str {
+        match self {
+            Self::ExplicitApprovalRequired => {
+                "privileged sandbox requires explicit escalation approval"
+            }
+            Self::NonNeverApprovalPolicyRequired => {
+                "privileged sandbox requires non-never approval policy"
+            }
+            Self::ExplicitScopeRequired => {
+                "privileged sandbox requires explicit scope via cwd or writable roots"
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PrivilegedSandboxSecurityError {
+    InvalidPolicy(String),
+    Violation(PrivilegedSandboxViolation),
+}
+
+impl PrivilegedSandboxSecurityError {
+    fn into_message(self) -> String {
+        match self {
+            Self::InvalidPolicy(message) => message,
+            Self::Violation(violation) => violation.message().to_owned(),
+        }
+    }
+}
+
+fn validate_privileged_sandbox_security(
+    sandbox_policy: Option<&super::SandboxPolicy>,
+    privileged_escalation_approved: bool,
+    approval_policy: Option<ApprovalPolicy>,
+    cwd: Option<&str>,
+) -> Result<(), RpcError> {
+    match check_privileged_sandbox_security(
+        sandbox_policy,
+        privileged_escalation_approved,
+        approval_policy,
+        cwd,
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(RpcError::InvalidRequest(error.into_message())),
+    }
+}
+
+fn check_privileged_sandbox_security(
+    sandbox_policy: Option<&super::SandboxPolicy>,
+    privileged_escalation_approved: bool,
+    approval_policy: Option<ApprovalPolicy>,
+    cwd: Option<&str>,
+) -> Result<(), PrivilegedSandboxSecurityError> {
+    let Some(sandbox_policy) = sandbox_policy else {
         return Ok(());
     };
-    let policy_summary =
-        summarize_sandbox_policy(sandbox_policy).map_err(RpcError::InvalidRequest)?;
+    let policy_summary = summarize_sandbox_policy(sandbox_policy)
+        .map_err(PrivilegedSandboxSecurityError::InvalidPolicy)?;
     if !policy_summary.is_privileged() {
         return Ok(());
     }
-    if !p.privileged_escalation_approved {
-        return Err(RpcError::InvalidRequest(
-            "privileged sandbox requires explicit escalation approval".to_owned(),
+    if !privileged_escalation_approved {
+        return Err(PrivilegedSandboxSecurityError::Violation(
+            PrivilegedSandboxViolation::ExplicitApprovalRequired,
         ));
     }
-    let approval = p.approval_policy.unwrap_or(ApprovalPolicy::Never);
-    if approval == ApprovalPolicy::Never {
-        return Err(RpcError::InvalidRequest(
-            "privileged sandbox requires non-never approval policy".to_owned(),
+    if approval_policy.unwrap_or(ApprovalPolicy::Never) == ApprovalPolicy::Never {
+        return Err(PrivilegedSandboxSecurityError::Violation(
+            PrivilegedSandboxViolation::NonNeverApprovalPolicyRequired,
         ));
     }
-    if !has_explicit_scope(
-        p.cwd.as_deref(),
-        policy_summary.has_non_empty_writable_roots(),
-    ) {
-        return Err(RpcError::InvalidRequest(
-            "privileged sandbox requires explicit scope via cwd or writable roots".to_owned(),
+    if !has_explicit_scope(cwd, policy_summary.has_non_empty_writable_roots()) {
+        return Err(PrivilegedSandboxSecurityError::Violation(
+            PrivilegedSandboxViolation::ExplicitScopeRequired,
         ));
     }
     Ok(())
@@ -510,8 +553,13 @@ mod tests {
     use serde::Deserialize;
     use serde_json::json;
 
-    use super::deserialize_result;
+    use super::{
+        check_privileged_sandbox_security, deserialize_result,
+        validate_privileged_sandbox_security, PrivilegedSandboxSecurityError,
+        PrivilegedSandboxViolation,
+    };
     use crate::runtime::errors::RpcError;
+    use crate::runtime::{ApprovalPolicy, SandboxPolicy, SandboxPreset};
 
     #[derive(Debug, Deserialize)]
     struct ExpectedResult {
@@ -543,5 +591,60 @@ mod tests {
         let result = deserialize_result::<ExpectedResult>("echo/test", json!({"ok": true}))
             .expect("matching result");
         assert!(result.ok);
+    }
+
+    #[test]
+    fn privileged_sandbox_security_is_pure_and_data_first() {
+        let sandbox_policy = SandboxPolicy::Preset(SandboxPreset::DangerFullAccess);
+        let err = validate_privileged_sandbox_security(
+            Some(&sandbox_policy),
+            false,
+            Some(ApprovalPolicy::OnRequest),
+            Some("/tmp"),
+        )
+        .expect_err("missing explicit opt-in must fail");
+        assert!(matches!(err, RpcError::InvalidRequest(_)));
+
+        validate_privileged_sandbox_security(
+            Some(&sandbox_policy),
+            true,
+            Some(ApprovalPolicy::OnRequest),
+            Some("/tmp"),
+        )
+        .expect("privileged sandbox with explicit approval and scope should pass");
+    }
+
+    #[test]
+    fn privileged_sandbox_violation_messages_are_data_driven() {
+        assert_eq!(
+            PrivilegedSandboxViolation::ExplicitApprovalRequired.message(),
+            "privileged sandbox requires explicit escalation approval"
+        );
+        assert_eq!(
+            PrivilegedSandboxViolation::NonNeverApprovalPolicyRequired.message(),
+            "privileged sandbox requires non-never approval policy"
+        );
+        assert_eq!(
+            PrivilegedSandboxViolation::ExplicitScopeRequired.message(),
+            "privileged sandbox requires explicit scope via cwd or writable roots"
+        );
+    }
+
+    #[test]
+    fn privileged_sandbox_check_returns_violation_reason_before_rpc_projection() {
+        let sandbox_policy = SandboxPolicy::Preset(SandboxPreset::DangerFullAccess);
+        let err = check_privileged_sandbox_security(
+            Some(&sandbox_policy),
+            true,
+            Some(ApprovalPolicy::OnRequest),
+            None,
+        )
+        .expect_err("missing scope must fail");
+        assert_eq!(
+            err,
+            PrivilegedSandboxSecurityError::Violation(
+                PrivilegedSandboxViolation::ExplicitScopeRequired
+            )
+        );
     }
 }

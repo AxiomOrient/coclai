@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -126,6 +127,11 @@ impl From<&SessionConfig> for ProfileCore {
             hooks: config.hooks.clone(),
         }
     }
+}
+
+pub(super) struct PreparedPromptRun<'a> {
+    pub(super) params: PromptRunParams,
+    pub(super) hooks: Cow<'a, RuntimeHookConfig>,
 }
 
 macro_rules! impl_profile_builder_methods {
@@ -326,36 +332,49 @@ impl SessionConfig {
 
 /// Pure transform from reusable session config + prompt into one prompt-run request.
 /// Allocation: clones config-owned Strings/vectors + one prompt String. Complexity: O(n), n = attachment count + field sizes.
+#[cfg(test)]
 pub(super) fn session_prompt_params(
     config: &SessionConfig,
     prompt: impl Into<String>,
 ) -> PromptRunParams {
-    ProfileCore::from(config).into_prompt_params(config.cwd.clone(), prompt.into())
+    session_prepared_prompt_run(config, prompt).params
 }
 
 /// Pure transform from reusable profile + turn input into one prompt-run request.
 /// Allocation: moves profile-owned Strings/vectors + one prompt String. Complexity: O(n), n = attachment count + field sizes.
+#[cfg(test)]
 pub(super) fn profile_to_prompt_params(
     cwd: String,
     prompt: impl Into<String>,
     profile: RunProfile,
 ) -> PromptRunParams {
-    ProfileCore::from(profile).into_prompt_params(cwd, prompt.into())
-}
-
-/// Split one profile into prompt params and scoped hooks without cloning hooks.
-pub(super) fn profile_to_prompt_params_with_hooks(
-    cwd: String,
-    prompt: impl Into<String>,
-    mut profile: RunProfile,
-) -> (PromptRunParams, RuntimeHookConfig) {
-    let hooks = std::mem::take(&mut profile.hooks);
-    let params = profile_to_prompt_params(cwd, prompt, profile);
-    (params, hooks)
+    prepared_prompt_run_from_profile(cwd, prompt, profile).params
 }
 
 /// Pure transform from session defaults into thread-start/resume overrides.
 /// Allocation: clones Strings/policy payloads from config. Complexity: O(n), n = field sizes.
 pub(super) fn session_thread_start_params(config: &SessionConfig) -> ThreadStartParams {
     ProfileCore::from(config).into_thread_start_params(config.cwd.clone())
+}
+
+pub(super) fn session_prepared_prompt_run<'a>(
+    config: &'a SessionConfig,
+    prompt: impl Into<String>,
+) -> PreparedPromptRun<'a> {
+    PreparedPromptRun {
+        params: ProfileCore::from(config).into_prompt_params(config.cwd.clone(), prompt.into()),
+        hooks: Cow::Borrowed(&config.hooks),
+    }
+}
+
+pub(super) fn prepared_prompt_run_from_profile<'a>(
+    cwd: String,
+    prompt: impl Into<String>,
+    mut profile: RunProfile,
+) -> PreparedPromptRun<'a> {
+    let hooks = std::mem::take(&mut profile.hooks);
+    PreparedPromptRun {
+        params: ProfileCore::from(profile).into_prompt_params(cwd, prompt.into()),
+        hooks: Cow::Owned(hooks),
+    }
 }

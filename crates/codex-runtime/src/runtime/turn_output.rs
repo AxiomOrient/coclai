@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::runtime::events::Envelope;
+use crate::runtime::events::{extract_text_from_params, Envelope};
 use crate::runtime::id::{parse_result_thread_id, parse_result_turn_id};
 use crate::runtime::rpc_contract::methods as events;
 
@@ -233,30 +233,6 @@ fn merge_turn_completed_text(out: &mut String, text: &str) {
     }
     out.push('\n');
     out.push_str(text);
-}
-
-fn extract_text_from_params(params: &Value) -> Option<String> {
-    for ptr in ["/item/text", "/text", "/outputText", "/output/text"] {
-        if let Some(text) = params.pointer(ptr).and_then(Value::as_str) {
-            return Some(text.to_owned());
-        }
-    }
-    if let Some(content) = params
-        .get("item")
-        .and_then(|item| item.get("content"))
-        .and_then(Value::as_array)
-    {
-        let mut joined = String::new();
-        for part in content {
-            if let Some(text) = part.get("text").and_then(Value::as_str) {
-                joined.push_str(text);
-            }
-        }
-        if !joined.is_empty() {
-            return Some(joined);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

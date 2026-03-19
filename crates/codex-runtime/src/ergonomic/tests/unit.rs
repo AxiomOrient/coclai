@@ -2,7 +2,7 @@ use super::super::*;
 use super::common::{TestPostHook, TestPreHook};
 use crate::runtime::{
     ApprovalPolicy, InitializeCapabilities, PromptRunError, PromptRunResult, ReasoningEffort,
-    RuntimeError, SandboxPolicy,
+    RunProfile, RuntimeError, SandboxPolicy,
 };
 use serde_json::json;
 use std::fs;
@@ -116,14 +116,16 @@ fn workflow_config_defaults_are_safe_and_explicit() {
 
 #[test]
 fn workflow_config_builder_supports_expert_overrides() {
-    let config = WorkflowConfig::new("/repo")
-        .with_model("gpt-5-codex")
-        .with_effort(ReasoningEffort::High)
-        .with_approval_policy(ApprovalPolicy::OnRequest)
-        .with_output_schema(json!({"type":"object","properties":{"result":{"type":"string"}}}))
-        .attach_path("README.md")
-        .with_run_pre_hook(Arc::new(TestPreHook))
-        .with_run_post_hook(Arc::new(TestPostHook));
+    let config = WorkflowConfig::new("/repo").with_run_profile(
+        RunProfile::new()
+            .with_model("gpt-5-codex")
+            .with_effort(ReasoningEffort::High)
+            .with_approval_policy(ApprovalPolicy::OnRequest)
+            .with_output_schema(json!({"type":"object","properties":{"result":{"type":"string"}}}))
+            .attach_path("README.md")
+            .with_pre_hook(Arc::new(TestPreHook))
+            .with_post_hook(Arc::new(TestPostHook)),
+    );
 
     assert_eq!(config.run_profile.model.as_deref(), Some("gpt-5-codex"));
     assert_eq!(config.run_profile.effort, ReasoningEffort::High);
@@ -142,13 +144,15 @@ fn workflow_config_builder_supports_expert_overrides() {
 
 #[test]
 fn to_session_config_projects_profile_without_loss() {
-    let config = WorkflowConfig::new("/repo")
-        .with_model("gpt-5-codex")
-        .with_effort(ReasoningEffort::High)
-        .with_approval_policy(ApprovalPolicy::OnRequest)
-        .with_output_schema(json!({"type":"object","required":["value"]}))
-        .with_timeout(Duration::from_secs(42))
-        .attach_path_with_placeholder("README.md", "readme");
+    let config = WorkflowConfig::new("/repo").with_run_profile(
+        RunProfile::new()
+            .with_model("gpt-5-codex")
+            .with_effort(ReasoningEffort::High)
+            .with_approval_policy(ApprovalPolicy::OnRequest)
+            .with_output_schema(json!({"type":"object","required":["value"]}))
+            .with_timeout(Duration::from_secs(42))
+            .attach_path_with_placeholder("README.md", "readme"),
+    );
     let session = config.to_session_config();
 
     assert_eq!(session.cwd, "/repo");
@@ -190,7 +194,7 @@ async fn workflow_run_propagates_output_schema_to_turn_start() {
                 .expect("temp dir path must be utf-8 in this test"),
         )
         .with_cli_bin(cli)
-        .with_output_schema(schema.clone()),
+        .with_run_profile(RunProfile::new().with_output_schema(schema.clone())),
     )
     .await
     .expect("connect workflow");

@@ -96,18 +96,30 @@ pub fn extract_skills_changed_notification(
     }
 }
 
+/// Return true iff the envelope is a notification for the given method.
+fn is_notification(envelope: &Envelope, method: &str) -> bool {
+    envelope.kind == MsgKind::Notification && envelope.method.as_deref() == Some(method)
+}
+
+/// Extract (thread_id, turn_id) from an envelope, returning None if either is absent.
+fn thread_turn_ids(envelope: &Envelope) -> Option<(String, String)> {
+    Some((
+        envelope.thread_id.as_deref()?.to_owned(),
+        envelope.turn_id.as_deref()?.to_owned(),
+    ))
+}
+
 /// Parse one `command/exec/outputDelta` notification into a typed payload.
 /// Allocation: one params clone for serde deserialization. Complexity: O(n), n = delta payload size.
 pub fn extract_command_exec_output_delta(
     envelope: &Envelope,
 ) -> Option<CommandExecOutputDeltaNotification> {
-    if envelope.kind != MsgKind::Notification
-        || envelope.method.as_deref()
-            != Some(crate::runtime::rpc_contract::methods::COMMAND_EXEC_OUTPUT_DELTA)
-    {
+    if !is_notification(
+        envelope,
+        crate::runtime::rpc_contract::methods::COMMAND_EXEC_OUTPUT_DELTA,
+    ) {
         return None;
     }
-
     let params = envelope.json.get("params")?.clone();
     serde_json::from_value(params).ok()
 }
@@ -115,15 +127,13 @@ pub fn extract_command_exec_output_delta(
 /// Parse one `item/agentMessage/delta` notification into a typed payload.
 /// Allocation: clones thread/turn/item ids and delta String. Complexity: O(n), n = delta size.
 pub fn extract_agent_message_delta(envelope: &Envelope) -> Option<AgentMessageDeltaNotification> {
-    if envelope.kind != MsgKind::Notification
-        || envelope.method.as_deref() != Some(methods::ITEM_AGENT_MESSAGE_DELTA)
-    {
+    if !is_notification(envelope, methods::ITEM_AGENT_MESSAGE_DELTA) {
         return None;
     }
-
+    let (thread_id, turn_id) = thread_turn_ids(envelope)?;
     Some(AgentMessageDeltaNotification {
-        thread_id: envelope.thread_id.as_deref()?.to_owned(),
-        turn_id: envelope.turn_id.as_deref()?.to_owned(),
+        thread_id,
+        turn_id,
         item_id: envelope.item_id.as_deref().map(ToOwned::to_owned),
         delta: envelope
             .json
@@ -137,16 +147,14 @@ pub fn extract_agent_message_delta(envelope: &Envelope) -> Option<AgentMessageDe
 /// Parse one `turn/completed` notification into a typed payload.
 /// Allocation: clones ids and optional text. Complexity: O(n), n = text size.
 pub fn extract_turn_completed(envelope: &Envelope) -> Option<TurnCompletedNotification> {
-    if envelope.kind != MsgKind::Notification
-        || envelope.method.as_deref() != Some(methods::TURN_COMPLETED)
-    {
+    if !is_notification(envelope, methods::TURN_COMPLETED) {
         return None;
     }
-
+    let (thread_id, turn_id) = thread_turn_ids(envelope)?;
     let params = envelope.json.get("params")?;
     Some(TurnCompletedNotification {
-        thread_id: envelope.thread_id.as_deref()?.to_owned(),
-        turn_id: envelope.turn_id.as_deref()?.to_owned(),
+        thread_id,
+        turn_id,
         text: extract_text_from_params(params),
     })
 }
@@ -154,17 +162,15 @@ pub fn extract_turn_completed(envelope: &Envelope) -> Option<TurnCompletedNotifi
 /// Parse one `turn/failed` notification into a typed payload.
 /// Allocation: clones ids and optional error message. Complexity: O(n), n = message size.
 pub fn extract_turn_failed(envelope: &Envelope) -> Option<TurnFailedNotification> {
-    if envelope.kind != MsgKind::Notification
-        || envelope.method.as_deref() != Some(methods::TURN_FAILED)
-    {
+    if !is_notification(envelope, methods::TURN_FAILED) {
         return None;
     }
-
+    let (thread_id, turn_id) = thread_turn_ids(envelope)?;
     let params = envelope.json.get("params")?;
     let (code, message) = extract_error_message(params);
     Some(TurnFailedNotification {
-        thread_id: envelope.thread_id.as_deref()?.to_owned(),
-        turn_id: envelope.turn_id.as_deref()?.to_owned(),
+        thread_id,
+        turn_id,
         code,
         message,
     })
@@ -173,34 +179,24 @@ pub fn extract_turn_failed(envelope: &Envelope) -> Option<TurnFailedNotification
 /// Parse one `turn/interrupted` notification into a typed payload.
 /// Allocation: clones ids. Complexity: O(1).
 pub fn extract_turn_interrupted(envelope: &Envelope) -> Option<TurnInterruptedNotification> {
-    if envelope.kind != MsgKind::Notification
-        || envelope.method.as_deref() != Some(methods::TURN_INTERRUPTED)
-    {
+    if !is_notification(envelope, methods::TURN_INTERRUPTED) {
         return None;
     }
-
-    Some(TurnInterruptedNotification {
-        thread_id: envelope.thread_id.as_deref()?.to_owned(),
-        turn_id: envelope.turn_id.as_deref()?.to_owned(),
-    })
+    let (thread_id, turn_id) = thread_turn_ids(envelope)?;
+    Some(TurnInterruptedNotification { thread_id, turn_id })
 }
 
 /// Parse one `turn/cancelled` notification into a typed payload.
 /// Allocation: clones ids. Complexity: O(1).
 pub fn extract_turn_cancelled(envelope: &Envelope) -> Option<TurnCancelledNotification> {
-    if envelope.kind != MsgKind::Notification
-        || envelope.method.as_deref() != Some(methods::TURN_CANCELLED)
-    {
+    if !is_notification(envelope, methods::TURN_CANCELLED) {
         return None;
     }
-
-    Some(TurnCancelledNotification {
-        thread_id: envelope.thread_id.as_deref()?.to_owned(),
-        turn_id: envelope.turn_id.as_deref()?.to_owned(),
-    })
+    let (thread_id, turn_id) = thread_turn_ids(envelope)?;
+    Some(TurnCancelledNotification { thread_id, turn_id })
 }
 
-fn extract_text_from_params(params: &Value) -> Option<String> {
+pub(crate) fn extract_text_from_params(params: &Value) -> Option<String> {
     for ptr in ["/item/text", "/text", "/outputText", "/output/text"] {
         if let Some(text) = params.pointer(ptr).and_then(Value::as_str) {
             return Some(text.to_owned());

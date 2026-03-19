@@ -5,6 +5,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{timeout, Instant};
 
 use crate::runtime::core::Runtime;
+use crate::runtime::detached_task::{current_detached_task_plan, spawn_detached_task};
 use crate::runtime::errors::{RpcError, RuntimeError};
 use crate::runtime::events::{
     extract_agent_message_delta, extract_turn_cancelled, extract_turn_completed,
@@ -788,15 +789,19 @@ impl PromptRunStream {
             return;
         };
 
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let runtime = self.runtime.clone();
-            handle.spawn(async move {
+        let runtime = self.runtime.clone();
+        let fallback_runtime = runtime.clone();
+        let thread_id = plan.thread_id.clone();
+        spawn_detached_task(
+            async move {
                 run_cleanup_plan(&runtime, plan).await;
-            });
-        } else {
-            self.runtime
-                .clear_thread_scoped_pre_tool_use_hooks(&self.thread_id);
-        }
+            },
+            current_detached_task_plan("prompt_stream_cleanup"),
+            move || {
+                fallback_runtime.record_detached_task_init_failed();
+                fallback_runtime.clear_thread_scoped_pre_tool_use_hooks(&thread_id);
+            },
+        );
     }
 
     fn interrupt_best_effort(&self) {

@@ -14,6 +14,7 @@ pub struct RuntimeMetricsSnapshot {
     pub ingress_rate_per_sec: f64,
     pub pending_rpc_count: u64,
     pub pending_server_request_count: u64,
+    pub detached_task_init_failed_count: u64,
     pub event_sink_queue_depth: u64,
     pub event_sink_queue_dropped: u64,
     pub broadcast_send_failed: u64,
@@ -31,6 +32,7 @@ pub(crate) struct RuntimeMetrics {
     ingress_total: AtomicU64,
     pending_rpc_count: AtomicU64,
     pending_server_request_count: AtomicU64,
+    detached_task_init_failed_count: AtomicU64,
     event_sink_queue_depth: AtomicU64,
     event_sink_queue_dropped: AtomicU64,
     broadcast_send_failed: AtomicU64,
@@ -50,6 +52,7 @@ impl RuntimeMetrics {
             ingress_total: AtomicU64::new(0),
             pending_rpc_count: AtomicU64::new(0),
             pending_server_request_count: AtomicU64::new(0),
+            detached_task_init_failed_count: AtomicU64::new(0),
             event_sink_queue_depth: AtomicU64::new(0),
             event_sink_queue_dropped: AtomicU64::new(0),
             broadcast_send_failed: AtomicU64::new(0),
@@ -103,6 +106,13 @@ impl RuntimeMetrics {
     pub(crate) fn set_pending_server_request_count(&self, count: u64) {
         self.pending_server_request_count
             .store(count, Ordering::Relaxed);
+    }
+
+    /// Record one detached-task helper runtime initialization failure.
+    /// Allocation: none. Complexity: O(1).
+    pub(crate) fn record_detached_task_init_failed(&self) {
+        self.detached_task_init_failed_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one successful sink queue enqueue.
@@ -174,6 +184,9 @@ impl RuntimeMetrics {
             ingress_rate_per_sec,
             pending_rpc_count: self.pending_rpc_count.load(Ordering::Relaxed),
             pending_server_request_count: self.pending_server_request_count.load(Ordering::Relaxed),
+            detached_task_init_failed_count: self
+                .detached_task_init_failed_count
+                .load(Ordering::Relaxed),
             event_sink_queue_depth: self.event_sink_queue_depth.load(Ordering::Relaxed),
             event_sink_queue_dropped: self.event_sink_queue_dropped.load(Ordering::Relaxed),
             broadcast_send_failed: self.broadcast_send_failed.load(Ordering::Relaxed),
@@ -263,5 +276,15 @@ mod tests {
         let snapshot = metrics.snapshot(1_000);
         assert_eq!(snapshot.pending_rpc_count, 0);
         assert_eq!(snapshot.pending_server_request_count, 0);
+    }
+
+    #[test]
+    fn snapshot_tracks_detached_task_init_failures() {
+        let metrics = RuntimeMetrics::new(0);
+        metrics.record_detached_task_init_failed();
+        metrics.record_detached_task_init_failed();
+
+        let snapshot = metrics.snapshot(1_000);
+        assert_eq!(snapshot.detached_task_init_failed_count, 2);
     }
 }

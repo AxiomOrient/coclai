@@ -2,8 +2,6 @@ use thiserror::Error;
 
 use crate::runtime::api::{PromptRunError, PromptRunParams, PromptRunResult};
 use crate::runtime::core::{Runtime, RuntimeConfig};
-#[cfg(test)]
-use crate::runtime::errors::RpcError;
 use crate::runtime::errors::RuntimeError;
 use crate::runtime::transport::StdioProcessSpec;
 
@@ -18,7 +16,7 @@ pub use profile::{RunProfile, SessionConfig};
 pub use session::Session;
 
 use compat_guard::validate_runtime_compatibility;
-use profile::{profile_to_prompt_params_with_hooks, session_thread_start_params};
+use profile::{prepared_prompt_run_from_profile, session_thread_start_params};
 
 #[derive(Clone)]
 pub struct Client {
@@ -93,9 +91,9 @@ impl Client {
         prompt: impl Into<String>,
         profile: RunProfile,
     ) -> Result<PromptRunResult, PromptRunError> {
-        let (params, hooks) = profile_to_prompt_params_with_hooks(cwd.into(), prompt, profile);
+        let prepared = prepared_prompt_run_from_profile(cwd.into(), prompt, profile);
         self.runtime
-            .run_prompt_with_hooks(params, Some(&hooks))
+            .run_prompt_with_hooks(prepared.params, Some(prepared.hooks.as_ref()))
             .await
     }
 
@@ -197,16 +195,6 @@ fn profile_to_prompt_params(
     profile: RunProfile,
 ) -> PromptRunParams {
     profile::profile_to_prompt_params(cwd, prompt, profile)
-}
-
-#[cfg(test)]
-fn ensure_session_open_for_prompt(closed: bool) -> Result<(), PromptRunError> {
-    session::ensure_session_open_for_prompt(closed)
-}
-
-#[cfg(test)]
-fn ensure_session_open_for_rpc(closed: bool) -> Result<(), RpcError> {
-    session::ensure_session_open_for_rpc(closed)
 }
 
 #[cfg(test)]

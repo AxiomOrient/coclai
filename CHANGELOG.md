@@ -5,20 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.1] - 2026-03-17
+## [0.6.1] - 2026-03-19
 
 ### Added
 - `ClientConfig` builders for per-process app-server launch environment, cwd, and extra args
 - `Session::ask_stream(...)` with typed turn-scoped streaming and final `finish()` result
+- `Session::ask_wait(prompt)` convenience wrapper — equivalent to `ask_stream(...).finish().await` without a manual event loop
 - typed live event extractors for agent message deltas and common turn terminal events
+
+### Fixed
+- `PromptRunStream` dropped outside an async Tokio context now correctly executes post-turn hooks, publishes the hook report, and sends the best-effort turn interrupt; previously only scoped hooks were cleared in that path
 
 ### Changed
 - prompt terminal resolution now shares one data-first path across streaming and non-streaming execution
-- dropping an unfinished prompt stream now sends a best-effort interrupt instead of silently leaving the turn running
+- `PromptRunStream::drop` redundant closed-check removed from `ask_wait` (delegated to `ask_stream`)
 - release docs and API reference now describe the current 0.6.1 public surface
 
 ### Removed
-- release note drift from the published 0.6.1 surface
+- legacy `"sandbox"` wire mode string removed from thread and turn start parameters; all presets including `ExternalSandbox` now use the `"sandboxPolicy"` object field on both `thread/start` and `turn/start`
 
 ## [0.5.0] - 2026-03-13
 

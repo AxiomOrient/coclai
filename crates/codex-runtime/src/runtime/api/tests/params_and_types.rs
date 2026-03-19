@@ -41,6 +41,7 @@ fn maps_turn_start_params_to_wire_shape() {
     assert_eq!(wire["sandboxPolicy"]["type"], "workspaceWrite");
     assert_eq!(wire["sandboxPolicy"]["writableRoots"][0], "/tmp");
     assert_eq!(wire["sandboxPolicy"]["networkAccess"], false);
+    assert_eq!(wire["privilegedEscalationApproved"], true);
     assert_eq!(wire["serviceTier"], "fast");
     assert_eq!(wire["personality"], "pragmatic");
     assert_eq!(wire["outputSchema"]["type"], "object");
@@ -363,7 +364,7 @@ fn maps_thread_start_params_to_wire_shape() {
         developer_instructions: Some("dev".to_owned()),
         personality: Some(Personality::Friendly),
         ephemeral: Some(true),
-        privileged_escalation_approved: false,
+        privileged_escalation_approved: true,
     };
 
     let wire = thread_start_params_to_wire(&params);
@@ -372,7 +373,8 @@ fn maps_thread_start_params_to_wire_shape() {
     assert_eq!(wire["serviceTier"], Value::Null);
     assert_eq!(wire["cwd"], "/work");
     assert_eq!(wire["approvalPolicy"], "on-request");
-    assert_eq!(wire["sandbox"], "read-only");
+    assert_eq!(wire["privilegedEscalationApproved"], true);
+    assert_eq!(wire["sandboxPolicy"]["type"], "readOnly");
     assert_eq!(wire["config"]["telemetry"], true);
     assert_eq!(wire["serviceName"], "codex");
     assert_eq!(wire["baseInstructions"], "base");
@@ -406,7 +408,7 @@ fn maps_thread_resume_overrides_to_supported_subset() {
     assert_eq!(wire["model"], "gpt-5");
     assert_eq!(wire["modelProvider"], "openai");
     assert_eq!(wire["serviceTier"], "flex");
-    assert_eq!(wire["sandbox"], "read-only");
+    assert_eq!(wire["sandboxPolicy"]["type"], "readOnly");
     assert_eq!(wire["config"]["telemetry"], true);
     assert_eq!(wire["baseInstructions"], "base");
     assert_eq!(wire["developerInstructions"], "dev");

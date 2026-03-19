@@ -180,6 +180,33 @@ pub(crate) struct SandboxPolicySummary {
     has_non_empty_writable_roots: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SandboxPolicyParseViolation {
+    NotObject,
+    MissingType,
+}
+
+impl SandboxPolicyParseViolation {
+    fn message(self, field_path: &str) -> String {
+        match self {
+            Self::NotObject => format!("{field_path} must be an object when provided"),
+            Self::MissingType => format!("{field_path}.type must be a non-empty string"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SandboxPolicyParseError {
+    field_path: String,
+    violation: SandboxPolicyParseViolation,
+}
+
+impl SandboxPolicyParseError {
+    fn message(&self) -> String {
+        self.violation.message(self.field_path.as_str())
+    }
+}
+
 impl SandboxPolicySummary {
     pub(crate) fn is_privileged(self) -> bool {
         !matches!(self.kind, SandboxPolicyKind::ReadOnly)
@@ -203,9 +230,17 @@ pub(crate) fn summarize_sandbox_policy_wire_value(
     value: &Value,
     field_path: &str,
 ) -> Result<SandboxPolicySummary, String> {
-    let policy_obj = value
-        .as_object()
-        .ok_or_else(|| format!("{field_path} must be an object when provided"))?;
+    summarize_sandbox_policy_wire_value_checked(value, field_path).map_err(|error| error.message())
+}
+
+fn summarize_sandbox_policy_wire_value_checked(
+    value: &Value,
+    field_path: &str,
+) -> Result<SandboxPolicySummary, SandboxPolicyParseError> {
+    let policy_obj = value.as_object().ok_or(SandboxPolicyParseError {
+        field_path: field_path.to_owned(),
+        violation: SandboxPolicyParseViolation::NotObject,
+    })?;
     let policy_type = parse_sandbox_policy_type(policy_obj, field_path)?;
     Ok(SandboxPolicySummary {
         kind: sandbox_policy_kind_from_wire(policy_type),
@@ -244,13 +279,16 @@ fn summarize_sandbox_preset(preset: &SandboxPreset) -> SandboxPolicySummary {
 fn parse_sandbox_policy_type<'a>(
     policy_obj: &'a Map<String, Value>,
     field_path: &str,
-) -> Result<&'a str, String> {
+) -> Result<&'a str, SandboxPolicyParseError> {
     let policy_type = policy_obj
         .get("type")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{field_path}.type must be a non-empty string"))?;
+        .ok_or(SandboxPolicyParseError {
+            field_path: field_path.to_owned(),
+            violation: SandboxPolicyParseViolation::MissingType,
+        })?;
     Ok(policy_type)
 }
 
@@ -377,5 +415,25 @@ mod tests {
         .expect("legacy workspaceWrite must still classify");
         assert!(workspace_write.is_privileged());
         assert!(workspace_write.has_non_empty_writable_roots());
+    }
+
+    #[test]
+    fn structured_parse_error_keeps_field_path_and_violation() {
+        let err = summarize_sandbox_policy_wire_value_checked(
+            &json!({"type":"   "}),
+            "params.sandboxPolicy",
+        )
+        .expect_err("empty type must fail");
+        assert_eq!(
+            err,
+            SandboxPolicyParseError {
+                field_path: "params.sandboxPolicy".to_owned(),
+                violation: SandboxPolicyParseViolation::MissingType,
+            }
+        );
+        assert_eq!(
+            err.message(),
+            "params.sandboxPolicy.type must be a non-empty string"
+        );
     }
 }

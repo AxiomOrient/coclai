@@ -226,6 +226,10 @@ impl Runtime {
         self.inner.metrics.snapshot(now_millis())
     }
 
+    pub(crate) fn record_detached_task_init_failed(&self) {
+        self.inner.metrics.record_detached_task_init_failed();
+    }
+
     /// Return latest hook report snapshot (last completed hook-enabled call wins).
     /// Allocation: clones report payload. Complexity: O(i), i = issue count.
     pub fn hook_report_snapshot(&self) -> HookReport {

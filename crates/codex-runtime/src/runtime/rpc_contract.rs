@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::runtime::api::{normalize_sandbox_mode_alias, summarize_sandbox_policy_wire_value};
+use crate::runtime::api::summarize_sandbox_policy_wire_value;
 use crate::runtime::errors::RpcError;
 use crate::runtime::turn_output::{parse_thread_id, parse_turn_id};
 
@@ -106,6 +106,13 @@ pub struct RpcContractDescriptor {
     pub request: RpcRequestContract,
     pub response: RpcResponseContract,
 }
+
+const FIELD_PARAMS: &str = "params";
+const FIELD_RESULT: &str = "result";
+const FIELD_PARAMS_SANDBOX_POLICY: &str = "params.sandboxPolicy";
+const KEY_DATA: &str = "data";
+const KEY_PROCESS_ID: &str = "processId";
+const KEY_SIZE: &str = "size";
 
 const RPC_CONTRACT_DESCRIPTORS: [RpcContractDescriptor; 15] = [
     RpcContractDescriptor {
@@ -238,6 +245,83 @@ pub fn validate_rpc_response(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RpcContractSurface {
+    Request,
+    Response,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RpcContractViolation {
+    EmptyMethod,
+    FieldMustBeObject { field_name: String },
+    FieldMustBeNonEmptyString { field_name: String, key: String },
+    MissingThreadId,
+    MissingTurnId,
+    ResultDataMustBeArray,
+    CommandMustBeArray,
+    CommandMustNotBeEmpty,
+    CommandItemsMustBeStrings,
+    ProcessIdRequiredForStreaming,
+    DisableOutputCapConflictsWithOutputBytesCap,
+    DisableTimeoutConflictsWithTimeoutMs,
+    TimeoutMsMustBeNonNegative,
+    OutputBytesCapMustBePositive,
+    SizeRequiresTty,
+    SizeMustBeObject,
+    SizeRowsMustBePositive,
+    SizeColsMustBePositive,
+    WriteRequestMustIncludeDeltaOrCloseStdin,
+    ExitCodeMustBeI32CompatibleInteger,
+    StdoutMustBeString,
+    StderrMustBeString,
+    ParamsFieldMustBeString { key: String },
+    Custom(String),
+}
+
+impl RpcContractViolation {
+    fn reason(&self) -> String {
+        match self {
+            Self::EmptyMethod => "json-rpc method must not be empty".to_owned(),
+            Self::FieldMustBeObject { field_name } => format!("{field_name} must be an object"),
+            Self::FieldMustBeNonEmptyString { field_name, key } => {
+                format!("{field_name}.{key} must be a non-empty string")
+            }
+            Self::MissingThreadId => "result is missing thread id".to_owned(),
+            Self::MissingTurnId => "result is missing turn id".to_owned(),
+            Self::ResultDataMustBeArray => "result.data must be an array".to_owned(),
+            Self::CommandMustBeArray => "params.command must be an array".to_owned(),
+            Self::CommandMustNotBeEmpty => "params.command must not be empty".to_owned(),
+            Self::CommandItemsMustBeStrings => "params.command items must be strings".to_owned(),
+            Self::ProcessIdRequiredForStreaming => {
+                "params.processId is required when tty or streaming is enabled".to_owned()
+            }
+            Self::DisableOutputCapConflictsWithOutputBytesCap => {
+                "params.disableOutputCap cannot be combined with params.outputBytesCap".to_owned()
+            }
+            Self::DisableTimeoutConflictsWithTimeoutMs => {
+                "params.disableTimeout cannot be combined with params.timeoutMs".to_owned()
+            }
+            Self::TimeoutMsMustBeNonNegative => "params.timeoutMs must be >= 0".to_owned(),
+            Self::OutputBytesCapMustBePositive => "params.outputBytesCap must be > 0".to_owned(),
+            Self::SizeRequiresTty => "params.size is only valid when params.tty is true".to_owned(),
+            Self::SizeMustBeObject => "params.size must be an object".to_owned(),
+            Self::SizeRowsMustBePositive => "params.size.rows must be > 0".to_owned(),
+            Self::SizeColsMustBePositive => "params.size.cols must be > 0".to_owned(),
+            Self::WriteRequestMustIncludeDeltaOrCloseStdin => {
+                "params must include deltaBase64, closeStdin, or both".to_owned()
+            }
+            Self::ExitCodeMustBeI32CompatibleInteger => {
+                "result.exitCode must be an i32-compatible integer".to_owned()
+            }
+            Self::StdoutMustBeString => "result.stdout must be a string".to_owned(),
+            Self::StderrMustBeString => "result.stderr must be a string".to_owned(),
+            Self::ParamsFieldMustBeString { key } => format!("params.{key} must be a string"),
+            Self::Custom(reason) => reason.clone(),
+        }
+    }
+}
+
 fn validate_request_by_descriptor(
     method: &str,
     params: &Value,
@@ -245,16 +329,18 @@ fn validate_request_by_descriptor(
 ) -> Result<(), RpcError> {
     match descriptor.request {
         RpcRequestContract::Object => {
-            require_object(params, method, "params")?;
+            require_object(params, method, FIELD_PARAMS)?;
             Ok(())
         }
         RpcRequestContract::ThreadStart => validate_thread_start_request(params, method),
-        RpcRequestContract::ThreadId => require_string(params, method, "threadId", "params"),
+        RpcRequestContract::ThreadId => require_string(params, method, "threadId", FIELD_PARAMS),
         RpcRequestContract::ThreadIdAndTurnId => {
-            require_string(params, method, "threadId", "params")?;
-            require_string(params, method, "turnId", "params")
+            require_string(params, method, "threadId", FIELD_PARAMS)?;
+            require_string(params, method, "turnId", FIELD_PARAMS)
         }
-        RpcRequestContract::ProcessId => require_string(params, method, "processId", "params"),
+        RpcRequestContract::ProcessId => {
+            require_string(params, method, KEY_PROCESS_ID, FIELD_PARAMS)
+        }
         RpcRequestContract::CommandExec => validate_command_exec_request(params, method),
         RpcRequestContract::CommandExecWrite => validate_command_exec_write_request(params, method),
         RpcRequestContract::CommandExecResize => {
@@ -270,14 +356,15 @@ fn validate_response_by_descriptor(
 ) -> Result<(), RpcError> {
     match descriptor.response {
         RpcResponseContract::Object => {
-            require_object(result, method, "result")?;
+            require_response_object(result, method, FIELD_RESULT)?;
             Ok(())
         }
         RpcResponseContract::ThreadId => {
             if parse_thread_id(result).is_none() {
-                Err(invalid_response(
+                Err(project_contract_violation(
                     method,
-                    "result is missing thread id",
+                    RpcContractSurface::Response,
+                    &RpcContractViolation::MissingThreadId,
                     result,
                 ))
             } else {
@@ -286,9 +373,10 @@ fn validate_response_by_descriptor(
         }
         RpcResponseContract::TurnId => {
             if parse_turn_id(result).is_none() {
-                Err(invalid_response(
+                Err(project_contract_violation(
                     method,
-                    "result is missing turn id",
+                    RpcContractSurface::Response,
+                    &RpcContractViolation::MissingTurnId,
                     result,
                 ))
             } else {
@@ -296,12 +384,13 @@ fn validate_response_by_descriptor(
             }
         }
         RpcResponseContract::DataArray => {
-            let obj = require_object(result, method, "result")?;
-            match obj.get("data") {
+            let obj = require_response_object(result, method, FIELD_RESULT)?;
+            match obj.get(KEY_DATA) {
                 Some(Value::Array(_)) => Ok(()),
-                _ => Err(invalid_response(
+                _ => Err(project_contract_violation(
                     method,
-                    "result.data must be an array",
+                    RpcContractSurface::Response,
+                    &RpcContractViolation::ResultDataMustBeArray,
                     result,
                 )),
             }
@@ -312,8 +401,11 @@ fn validate_response_by_descriptor(
 
 fn validate_method_name(method: &str) -> Result<(), RpcError> {
     if method.trim().is_empty() {
-        return Err(RpcError::InvalidRequest(
-            "json-rpc method must not be empty".to_owned(),
+        return Err(project_contract_violation(
+            method,
+            RpcContractSurface::Request,
+            &RpcContractViolation::EmptyMethod,
+            &Value::Null,
         ));
     }
     Ok(())
@@ -324,9 +416,33 @@ fn require_object<'a>(
     method: &str,
     field_name: &str,
 ) -> Result<&'a serde_json::Map<String, Value>, RpcError> {
-    value
-        .as_object()
-        .ok_or_else(|| invalid_request(method, &format!("{field_name} must be an object"), value))
+    require_object_on(RpcContractSurface::Request, value, method, field_name)
+}
+
+fn require_response_object<'a>(
+    value: &'a Value,
+    method: &str,
+    field_name: &str,
+) -> Result<&'a serde_json::Map<String, Value>, RpcError> {
+    require_object_on(RpcContractSurface::Response, value, method, field_name)
+}
+
+fn require_object_on<'a>(
+    surface: RpcContractSurface,
+    value: &'a Value,
+    method: &str,
+    field_name: &str,
+) -> Result<&'a serde_json::Map<String, Value>, RpcError> {
+    value.as_object().ok_or_else(|| {
+        project_contract_violation(
+            method,
+            surface,
+            &RpcContractViolation::FieldMustBeObject {
+                field_name: field_name.to_owned(),
+            },
+            value,
+        )
+    })
 }
 
 fn require_string(
@@ -338,75 +454,56 @@ fn require_string(
     let obj = require_object(value, method, field_name)?;
     match obj.get(key).and_then(Value::as_str) {
         Some(v) if !v.trim().is_empty() => Ok(()),
-        _ => Err(invalid_request(
+        _ => Err(project_contract_violation(
             method,
-            &format!("{field_name}.{key} must be a non-empty string"),
+            RpcContractSurface::Request,
+            &RpcContractViolation::FieldMustBeNonEmptyString {
+                field_name: field_name.to_owned(),
+                key: key.to_owned(),
+            },
             value,
         )),
     }
 }
 
 fn validate_thread_start_request(params: &Value, method: &str) -> Result<(), RpcError> {
-    let obj = require_object(params, method, "params")?;
-
-    if let Some(sandbox_mode) = obj.get("sandbox") {
-        validate_thread_sandbox_mode(sandbox_mode, method, params)?;
-    }
-    Ok(())
-}
-
-fn validate_thread_sandbox_mode(
-    sandbox_mode: &Value,
-    method: &str,
-    payload: &Value,
-) -> Result<(), RpcError> {
-    let Some(raw_mode) = sandbox_mode.as_str() else {
-        return Err(invalid_request(
-            method,
-            "params.sandbox must be a non-empty string",
-            payload,
-        ));
-    };
-    let normalized = normalize_sandbox_mode_alias(raw_mode).ok_or_else(|| {
-        invalid_request(
-            method,
-            "params.sandbox must be one of read-only, workspace-write, danger-full-access",
-            payload,
-        )
-    })?;
-    if normalized.is_empty() {
-        return Err(invalid_request(
-            method,
-            "params.sandbox must be a non-empty string",
-            payload,
-        ));
-    }
+    require_object(params, method, FIELD_PARAMS)?;
     Ok(())
 }
 
 fn validate_command_exec_request(params: &Value, method: &str) -> Result<(), RpcError> {
-    let obj = require_object(params, method, "params")?;
+    let obj = require_object(params, method, FIELD_PARAMS)?;
     let command = obj
         .get("command")
         .and_then(Value::as_array)
-        .ok_or_else(|| invalid_request(method, "params.command must be an array", params))?;
+        .ok_or_else(|| {
+            project_contract_violation(
+                method,
+                RpcContractSurface::Request,
+                &RpcContractViolation::CommandMustBeArray,
+                params,
+            )
+        })?;
     if command.is_empty() {
-        return Err(invalid_request(
+        return Err(project_contract_violation(
             method,
-            "params.command must not be empty",
+            RpcContractSurface::Request,
+            &RpcContractViolation::CommandMustNotBeEmpty,
             params,
         ));
     }
     if command.iter().any(|value| value.as_str().is_none()) {
-        return Err(invalid_request(
+        return Err(project_contract_violation(
             method,
-            "params.command items must be strings",
+            RpcContractSurface::Request,
+            &RpcContractViolation::CommandItemsMustBeStrings,
             params,
         ));
     }
 
-    let process_id = get_optional_non_empty_string(obj, "processId")
-        .map_err(|reason| invalid_request(method, &reason, params))?;
+    let process_id = get_optional_non_empty_string(obj, KEY_PROCESS_ID).map_err(|violation| {
+        project_contract_violation(method, RpcContractSurface::Request, &violation, params)
+    })?;
     let tty = get_bool(obj, "tty");
     let stream_stdin = get_bool(obj, "streamStdin");
     let stream_stdout_stderr = get_bool(obj, "streamStdoutStderr");
@@ -414,56 +511,62 @@ fn validate_command_exec_request(params: &Value, method: &str) -> Result<(), Rpc
     let effective_stream_stdout_stderr = tty || stream_stdout_stderr;
 
     if (tty || effective_stream_stdin || effective_stream_stdout_stderr) && process_id.is_none() {
-        return Err(invalid_request(
+        return Err(project_contract_violation(
             method,
-            "params.processId is required when tty or streaming is enabled",
+            RpcContractSurface::Request,
+            &RpcContractViolation::ProcessIdRequiredForStreaming,
             params,
         ));
     }
     if get_bool(obj, "disableOutputCap") && obj.get("outputBytesCap").is_some() {
-        return Err(invalid_request(
+        return Err(project_contract_violation(
             method,
-            "params.disableOutputCap cannot be combined with params.outputBytesCap",
+            RpcContractSurface::Request,
+            &RpcContractViolation::DisableOutputCapConflictsWithOutputBytesCap,
             params,
         ));
     }
     if get_bool(obj, "disableTimeout") && obj.get("timeoutMs").is_some() {
-        return Err(invalid_request(
+        return Err(project_contract_violation(
             method,
-            "params.disableTimeout cannot be combined with params.timeoutMs",
+            RpcContractSurface::Request,
+            &RpcContractViolation::DisableTimeoutConflictsWithTimeoutMs,
             params,
         ));
     }
     if let Some(timeout_ms) = obj.get("timeoutMs").and_then(Value::as_i64) {
         if timeout_ms < 0 {
-            return Err(invalid_request(
+            return Err(project_contract_violation(
                 method,
-                "params.timeoutMs must be >= 0",
+                RpcContractSurface::Request,
+                &RpcContractViolation::TimeoutMsMustBeNonNegative,
                 params,
             ));
         }
     }
     if let Some(output_bytes_cap) = obj.get("outputBytesCap").and_then(Value::as_u64) {
         if output_bytes_cap == 0 {
-            return Err(invalid_request(
+            return Err(project_contract_violation(
                 method,
-                "params.outputBytesCap must be > 0",
+                RpcContractSurface::Request,
+                &RpcContractViolation::OutputBytesCapMustBePositive,
                 params,
             ));
         }
     }
-    if let Some(size) = obj.get("size") {
+    if let Some(size) = obj.get(KEY_SIZE) {
         if !tty {
-            return Err(invalid_request(
+            return Err(project_contract_violation(
                 method,
-                "params.size is only valid when params.tty is true",
+                RpcContractSurface::Request,
+                &RpcContractViolation::SizeRequiresTty,
                 params,
             ));
         }
         validate_command_exec_size(size, method, params)?;
     }
     if let Some(sandbox_policy) = obj.get("sandboxPolicy") {
-        summarize_sandbox_policy_wire_value(sandbox_policy, "params.sandboxPolicy")
+        summarize_sandbox_policy_wire_value(sandbox_policy, FIELD_PARAMS_SANDBOX_POLICY)
             .map_err(|reason| invalid_request(method, &reason, params))?;
     }
 
@@ -471,14 +574,15 @@ fn validate_command_exec_request(params: &Value, method: &str) -> Result<(), Rpc
 }
 
 fn validate_command_exec_write_request(params: &Value, method: &str) -> Result<(), RpcError> {
-    require_string(params, method, "processId", "params")?;
-    let obj = require_object(params, method, "params")?;
+    require_string(params, method, KEY_PROCESS_ID, FIELD_PARAMS)?;
+    let obj = require_object(params, method, FIELD_PARAMS)?;
     let has_delta = obj.get("deltaBase64").and_then(Value::as_str).is_some();
     let close_stdin = get_bool(obj, "closeStdin");
     if !has_delta && !close_stdin {
-        return Err(invalid_request(
+        return Err(project_contract_violation(
             method,
-            "params must include deltaBase64, closeStdin, or both",
+            RpcContractSurface::Request,
+            &RpcContractViolation::WriteRequestMustIncludeDeltaOrCloseStdin,
             params,
         ));
     }
@@ -486,37 +590,45 @@ fn validate_command_exec_write_request(params: &Value, method: &str) -> Result<(
 }
 
 fn validate_command_exec_resize_request(params: &Value, method: &str) -> Result<(), RpcError> {
-    require_string(params, method, "processId", "params")?;
-    let obj = require_object(params, method, "params")?;
-    let size = obj
-        .get("size")
-        .ok_or_else(|| invalid_request(method, "params.size must be an object", params))?;
+    require_string(params, method, KEY_PROCESS_ID, FIELD_PARAMS)?;
+    let obj = require_object(params, method, FIELD_PARAMS)?;
+    let size = obj.get(KEY_SIZE).ok_or_else(|| {
+        project_contract_violation(
+            method,
+            RpcContractSurface::Request,
+            &RpcContractViolation::SizeMustBeObject,
+            params,
+        )
+    })?;
     validate_command_exec_size(size, method, params)
 }
 
 fn validate_command_exec_response(result: &Value, method: &str) -> Result<(), RpcError> {
-    let obj = require_object(result, method, "result")?;
+    let obj = require_response_object(result, method, FIELD_RESULT)?;
     match obj.get("exitCode").and_then(Value::as_i64) {
         Some(code) if i32::try_from(code).is_ok() => {}
         _ => {
-            return Err(invalid_response(
+            return Err(project_contract_violation(
                 method,
-                "result.exitCode must be an i32-compatible integer",
+                RpcContractSurface::Response,
+                &RpcContractViolation::ExitCodeMustBeI32CompatibleInteger,
                 result,
             ));
         }
     }
     if obj.get("stdout").and_then(Value::as_str).is_none() {
-        return Err(invalid_response(
+        return Err(project_contract_violation(
             method,
-            "result.stdout must be a string",
+            RpcContractSurface::Response,
+            &RpcContractViolation::StdoutMustBeString,
             result,
         ));
     }
     if obj.get("stderr").and_then(Value::as_str).is_none() {
-        return Err(invalid_response(
+        return Err(project_contract_violation(
             method,
-            "result.stderr must be a string",
+            RpcContractSurface::Response,
+            &RpcContractViolation::StderrMustBeString,
             result,
         ));
     }
@@ -524,22 +636,29 @@ fn validate_command_exec_response(result: &Value, method: &str) -> Result<(), Rp
 }
 
 fn validate_command_exec_size(size: &Value, method: &str, payload: &Value) -> Result<(), RpcError> {
-    let size_obj = size
-        .as_object()
-        .ok_or_else(|| invalid_request(method, "params.size must be an object", payload))?;
+    let size_obj = size.as_object().ok_or_else(|| {
+        project_contract_violation(
+            method,
+            RpcContractSurface::Request,
+            &RpcContractViolation::SizeMustBeObject,
+            payload,
+        )
+    })?;
     let rows = size_obj.get("rows").and_then(Value::as_u64).unwrap_or(0);
     let cols = size_obj.get("cols").and_then(Value::as_u64).unwrap_or(0);
     if rows == 0 {
-        return Err(invalid_request(
+        return Err(project_contract_violation(
             method,
-            "params.size.rows must be > 0",
+            RpcContractSurface::Request,
+            &RpcContractViolation::SizeRowsMustBePositive,
             payload,
         ));
     }
     if cols == 0 {
-        return Err(invalid_request(
+        return Err(project_contract_violation(
             method,
-            "params.size.cols must be > 0",
+            RpcContractSurface::Request,
+            &RpcContractViolation::SizeColsMustBePositive,
             payload,
         ));
     }
@@ -549,11 +668,16 @@ fn validate_command_exec_size(size: &Value, method: &str, payload: &Value) -> Re
 fn get_optional_non_empty_string<'a>(
     obj: &'a serde_json::Map<String, Value>,
     key: &str,
-) -> Result<Option<&'a str>, String> {
+) -> Result<Option<&'a str>, RpcContractViolation> {
     match obj.get(key) {
         Some(Value::String(text)) if !text.trim().is_empty() => Ok(Some(text)),
-        Some(Value::String(_)) => Err(format!("params.{key} must be a non-empty string")),
-        Some(_) => Err(format!("params.{key} must be a string")),
+        Some(Value::String(_)) => Err(RpcContractViolation::FieldMustBeNonEmptyString {
+            field_name: FIELD_PARAMS.to_owned(),
+            key: key.to_owned(),
+        }),
+        Some(_) => Err(RpcContractViolation::ParamsFieldMustBeString {
+            key: key.to_owned(),
+        }),
         None => Ok(None),
     }
 }
@@ -563,16 +687,28 @@ fn get_bool(obj: &serde_json::Map<String, Value>, key: &str) -> bool {
 }
 
 fn invalid_request(method: &str, reason: &str, payload: &Value) -> RpcError {
-    RpcError::InvalidRequest(format!(
-        "invalid json-rpc request for {method}: {reason}; payload={}",
-        payload_summary(payload)
-    ))
+    project_contract_violation(
+        method,
+        RpcContractSurface::Request,
+        &RpcContractViolation::Custom(reason.to_owned()),
+        payload,
+    )
 }
 
-fn invalid_response(method: &str, reason: &str, payload: &Value) -> RpcError {
+fn project_contract_violation(
+    method: &str,
+    surface: RpcContractSurface,
+    violation: &RpcContractViolation,
+    payload: &Value,
+) -> RpcError {
+    let side = match surface {
+        RpcContractSurface::Request => "request",
+        RpcContractSurface::Response => "response",
+    };
     RpcError::InvalidRequest(format!(
-        "invalid json-rpc response for {method}: {reason}; payload={}",
-        payload_summary(payload)
+        "invalid json-rpc {side} for {method}: {}; payload={}",
+        violation.reason(),
+        payload_summary(payload),
     ))
 }
 
@@ -622,38 +758,6 @@ mod tests {
             RpcValidationMode::KnownMethods,
         )
         .expect("valid params");
-    }
-
-    #[test]
-    fn validates_thread_start_accepts_string_sandbox_mode() {
-        validate_rpc_request(
-            "thread/start",
-            &json!({"cwd":"/tmp","sandbox":"read-only"}),
-            RpcValidationMode::KnownMethods,
-        )
-        .expect("thread/start should accept sandbox mode");
-    }
-
-    #[test]
-    fn validates_thread_start_rejects_non_string_sandbox_mode() {
-        let err = validate_rpc_request(
-            "thread/start",
-            &json!({"cwd":"/tmp","sandbox":{"type":"readOnly"}}),
-            RpcValidationMode::KnownMethods,
-        )
-        .expect_err("thread/start must reject non-string sandbox");
-        assert!(matches!(err, RpcError::InvalidRequest(_)));
-    }
-
-    #[test]
-    fn validates_thread_start_rejects_unknown_sandbox_mode() {
-        let err = validate_rpc_request(
-            "thread/start",
-            &json!({"cwd":"/tmp","sandbox":"external-sandbox"}),
-            RpcValidationMode::KnownMethods,
-        )
-        .expect_err("thread/start must reject unknown sandbox mode");
-        assert!(matches!(err, RpcError::InvalidRequest(_)));
     }
 
     #[test]
@@ -734,6 +838,21 @@ mod tests {
             RpcValidationMode::KnownMethods,
         )
         .expect("tty with processId should pass");
+    }
+
+    #[test]
+    fn validates_command_exec_request_rejects_non_string_process_id() {
+        let err = validate_rpc_request(
+            "command/exec",
+            &json!({"command":["bash"],"processId":123}),
+            RpcValidationMode::KnownMethods,
+        )
+        .expect_err("non-string processId must fail");
+
+        let RpcError::InvalidRequest(message) = err else {
+            panic!("expected invalid request");
+        };
+        assert!(message.contains("params.processId must be a string"));
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub mod api;
 pub mod approvals;
 pub mod client;
 pub mod core;
+pub(crate) mod detached_task;
 pub mod errors;
 pub mod events;
 pub mod hooks;

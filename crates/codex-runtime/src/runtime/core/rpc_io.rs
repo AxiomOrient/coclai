@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
+use crate::runtime::detached_task::{current_detached_task_plan, spawn_detached_task};
 use crate::runtime::errors::{RpcError, RuntimeError};
 
 use super::io_policy::{build_rpc_request, project_pending_rpc_outcome, PendingRpcOutcome};
@@ -113,11 +114,16 @@ impl Drop for PendingRpcGuard {
             return;
         }
         let inner = self.inner.clone();
+        let fallback_inner = inner.clone();
         let rpc_id = self.rpc_id;
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
+        spawn_detached_task(
+            async move {
                 clear_pending_rpc(&inner, rpc_id).await;
-            });
-        }
+            },
+            current_detached_task_plan("clear_pending_rpc"),
+            move || {
+                fallback_inner.metrics.record_detached_task_init_failed();
+            },
+        );
     }
 }

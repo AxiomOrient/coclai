@@ -23,7 +23,6 @@ It exposes six layers so you can start simple and reach deeper only when needed:
 
 - one repository
 - one published crate
-- one canonical repository spec: [`SPEC.md`](SPEC.md)
 - `web` and `artifact` ship as built-in higher-order modules in the default crate
 - `quick_run`, `Workflow`, and `automation` stay convenience layers above the substrate core
 
@@ -174,7 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             codex_runtime::rpc_methods::THREAD_START,
             json!({
                 "cwd": "/abs/path/workdir",
-                "sandbox": "read-only"
+                "sandboxPolicy": { "type": "readOnly" }
             }),
         )
         .await?;
@@ -223,6 +222,16 @@ Important runtime submodules available for direct use when re-exports are not en
 `Session::ask_stream(prompt)` starts one turn on an already loaded session and returns a scoped handle with `thread_id()`, `turn_id()`, `recv().await`, and `finish().await`.
 
 Use it when you need typed turn-scoped streaming on the canonical `runtime::{Client, Session}` bridge without reimplementing global `subscribe_live()` filtering. `finish()` is the normal completion path; dropping an unfinished stream triggers a best-effort interrupt.
+
+If you want the same scoped completion path without manually reading events, use `Session::ask_wait(prompt)`. It is a thin convenience over `ask_stream(...).finish().await`.
+
+Completion and hook observability today:
+- per-turn completion: `Session::ask_wait(...)` or `PromptRunStream::finish().await`
+- per-turn terminal events: `turn/completed`, `turn/failed`, `turn/interrupted`, `turn/cancelled`
+- raw runtime stream: `Runtime::subscribe_live()`
+- latest hook outcome snapshot: `Runtime::hook_report_snapshot()`
+
+There is no separate OS-level or push notification helper in the runtime. Completion is exposed through stream/event surfaces.
 
 ## Built-in Higher-Order Modules
 
@@ -301,35 +310,22 @@ Important contract:
 
 ## Documentation
 
-- [SPEC.md](SPEC.md): canonical repository-level substrate contract, packaging model, and AxiomRunner consumer profile
-- [docs/README.md](docs/README.md): active documentation index
 - [API_REFERENCE.md](docs/API_REFERENCE.md): full public API surface, typed payload contracts, validation and security rules
 - [TEST_TREE.md](docs/TEST_TREE.md): test layer structure and live-gate boundary
-- [BACKLOG.md](docs/BACKLOG.md): non-blocking follow-up improvements
 - [CHANGELOG.md](CHANGELOG.md): release history
 
 ## Quality Gates
 
-Deterministic release gates:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-./scripts/check_product_hygiene.sh
-./scripts/check_security_gate.sh
-./scripts/check_blocker_regressions.sh
 cargo test --workspace
 ```
 
-Release preflight:
-```bash
-./scripts/release_preflight.sh
-```
-
-Opt-in real-server preflight:
+Opt-in real-server tests:
 ```bash
 CODEX_RUNTIME_REAL_SERVER_APPROVED=1 \
-CODEX_RUNTIME_RELEASE_INCLUDE_REAL_SERVER=1 \
-./scripts/release_preflight.sh
+cargo test -p codex-runtime ergonomic::tests::real_server:: -- --ignored --nocapture
 ```
 
 ## Design Boundaries

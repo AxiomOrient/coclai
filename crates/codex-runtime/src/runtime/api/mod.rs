@@ -39,8 +39,7 @@ pub use models::{
     PromptTurnFailure, PromptTurnTerminalState,
 };
 pub(crate) use types::{
-    normalize_sandbox_mode_alias, sandbox_mode_to_wire_value, sandbox_policy_to_wire_value,
-    summarize_sandbox_policy, summarize_sandbox_policy_wire_value,
+    sandbox_policy_to_wire_value, summarize_sandbox_policy, summarize_sandbox_policy_wire_value,
 };
 pub use types::{
     ApprovalPolicy, ByteRange, CommandExecOutputDeltaNotification, CommandExecOutputStream,

@@ -7,9 +7,8 @@ use serde_json::json;
 use tokio::time::sleep;
 
 use super::{
-    ensure_session_open_for_prompt, ensure_session_open_for_rpc, parse_initialize_user_agent,
-    profile_to_prompt_params, session_prompt_params, ClientConfig, CompatibilityGuard, RunProfile,
-    SemVerTriplet, SessionConfig,
+    parse_initialize_user_agent, profile_to_prompt_params, session_prompt_params, ClientConfig,
+    CompatibilityGuard, RunProfile, SemVerTriplet, SessionConfig,
 };
 use crate::plugin::{HookAction, HookContext, HookIssue, HookPhase, PostHook, PreHook};
 use crate::runtime::api::{
@@ -1139,6 +1138,24 @@ async fn session_ask_stream_yields_scoped_events_and_final_result() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn session_ask_wait_finishes_scoped_stream_without_manual_loop() {
+    let (temp, client) =
+        connect_mock_client("runtime_client_session_ask_wait", ClientConfig::new()).await;
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start session");
+
+    let result = session.ask_wait("stream-ok").await.expect("ask wait");
+    assert_eq!(result.thread_id, "thr_client");
+    assert_eq!(result.turn_id, "turn_client");
+    assert_eq!(result.assistant_text, "stream-ok");
+
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn session_ask_stream_finishes_with_turn_failure_context() {
     let temp = TempDir::new("runtime_client_stream_failure");
     let cli = write_stream_failure_cli_script(&temp.root);
@@ -1174,6 +1191,32 @@ async fn session_ask_stream_finishes_with_turn_failure_context() {
     ));
 
     let err = stream.finish().await.expect_err("stream should fail");
+    assert!(matches!(
+        err,
+        crate::runtime::api::PromptRunError::TurnFailedWithContext(ref failure)
+            if failure.code == Some(429) && failure.message == "rate limited"
+    ));
+
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_ask_wait_preserves_turn_failure_context() {
+    let temp = TempDir::new("runtime_client_ask_wait_failure");
+    let cli = write_stream_failure_cli_script(&temp.root);
+    let client = super::Client::connect(ClientConfig::new().with_cli_bin(cli))
+        .await
+        .expect("client connect");
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start session");
+
+    let err = session
+        .ask_wait("ignored")
+        .await
+        .expect_err("ask wait should fail");
     assert!(matches!(
         err,
         crate::runtime::api::PromptRunError::TurnFailedWithContext(ref failure)
@@ -1292,7 +1335,10 @@ fn runtime_module_reexports_thread_types_documented_in_api_reference() {
 
 #[test]
 fn session_open_guards_return_error_when_closed() {
-    let prompt_err = ensure_session_open_for_prompt(true).expect_err("must fail");
+    let state = super::session::SessionState::new();
+    state.mark_closed();
+
+    let prompt_err = state.ensure_open_for_prompt().expect_err("must fail");
     assert!(matches!(
         prompt_err,
         crate::runtime::api::PromptRunError::Rpc(crate::runtime::errors::RpcError::InvalidRequest(
@@ -1300,11 +1346,33 @@ fn session_open_guards_return_error_when_closed() {
         ))
     ));
 
-    let rpc_err = ensure_session_open_for_rpc(true).expect_err("must fail");
+    let rpc_err = state.ensure_open_for_rpc().expect_err("must fail");
     assert!(matches!(
         rpc_err,
         crate::runtime::errors::RpcError::InvalidRequest(_)
     ));
+}
+
+#[test]
+fn session_state_open_guards_are_data_first() {
+    let state = super::session::SessionState::new();
+    assert!(state.ensure_open_for_prompt().is_ok());
+    assert!(state.ensure_open_for_rpc().is_ok());
+}
+
+#[test]
+fn session_close_state_is_data_first() {
+    let cached = Err(crate::runtime::errors::RpcError::InvalidRequest(
+        "cached".to_owned(),
+    ));
+    assert!(matches!(
+        super::session::next_close_state(None),
+        super::session::SessionCloseState::StartClosing
+    ));
+    assert_eq!(
+        super::session::next_close_state(Some(&cached)),
+        super::session::SessionCloseState::ReturnCached(cached)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

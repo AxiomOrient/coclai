@@ -392,6 +392,7 @@ Note: `cwd` can only be set at construction time. To change cwd, create a new `S
 Methods:
 - `is_closed()` — check whether the session has been closed
 - `ask(prompt)` — run one turn with session defaults
+- `ask_wait(prompt)` — run one turn through the scoped stream path and wait for the final result
 - `ask_stream(prompt)` — run one turn and receive typed turn-scoped streaming events
 - `ask_with(params)` — run one turn with explicit `PromptRunParams`
 - `ask_with_profile(prompt, profile)` — run one turn with a profile override
@@ -403,8 +404,9 @@ Contract:
 1. `close()` is single-flight and reuses the first archive result.
 2. Closed sessions reject new prompt or RPC actions locally without sending any requests.
 3. Loaded sessions do not send a second `thread/resume` for `ask*`.
-4. `ask_stream()` scopes live delivery to one turn and keeps `Runtime::subscribe_live()` as the raw escape hatch.
-5. `finish()` is the normal completion path for `PromptRunStream`; dropping an unfinished stream sends a best-effort interrupt.
+4. `ask_wait()` is a thin convenience over `ask_stream(...).finish().await` for callers that only need scoped completion.
+5. `ask_stream()` scopes live delivery to one turn and keeps `Runtime::subscribe_live()` as the raw escape hatch.
+6. `finish()` is the normal completion path for `PromptRunStream`; dropping an unfinished stream sends a best-effort interrupt.
 
 ## AppServer API
 
@@ -461,6 +463,14 @@ Contract:
 - `hook_report_snapshot()` — latest `HookReport` from the last hook-enabled call
 - `register_hooks(hooks)` — register additional hooks into running runtime (dedup by name)
 - `shutdown()` — shutdown child process and background tasks
+
+Completion surfaces:
+- scoped result without manual event loop: `Session::ask_wait(...)`
+- scoped stream completion: `PromptRunStream::finish().await`
+- typed terminal live events: `turn/completed`, `turn/failed`, `turn/interrupted`, `turn/cancelled`
+- latest hook outcome snapshot: `hook_report_snapshot()`
+
+There is no dedicated OS-level notifier in the runtime layer; completion is surfaced through result and event APIs.
 
 ### Raw and validated RPC
 - `call_raw(method, params)` — no validation
@@ -528,7 +538,7 @@ Stable typed fields:
 - `personality`, `ephemeral`
 
 Contract:
-1. `thread/start` uses upstream `sandbox` key on the wire (not `sandboxPolicy`).
+1. `thread/start` and `thread/resume` use the upstream `sandboxPolicy` key on the wire.
 2. `thread/resume` only accepts the shared stable override subset (no start-only fields).
 3. `service_name` and `ephemeral` are start-only fields.
 4. Experimental fields stay out of the typed surface (see Experimental Field Policy).

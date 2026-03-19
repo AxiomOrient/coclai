@@ -8,16 +8,89 @@ use crate::runtime::core::Runtime;
 use crate::runtime::errors::RpcError;
 use crate::runtime::hooks::merge_hook_configs;
 
-use super::profile::{profile_to_prompt_params_with_hooks, session_prompt_params};
+use super::profile::{prepared_prompt_run_from_profile, session_prepared_prompt_run};
 use super::{RunProfile, SessionConfig};
+
+const SESSION_CLOSED_MESSAGE: &str = "session is closed";
 
 #[derive(Clone)]
 pub struct Session {
     runtime: Runtime,
     pub thread_id: String,
     pub config: SessionConfig,
+    state: SessionState,
+}
+
+#[derive(Clone)]
+pub(super) struct SessionState {
     closed: Arc<AtomicBool>,
     close_result: Arc<Mutex<Option<Result<(), RpcError>>>>,
+}
+
+struct SessionClosePermit<'a> {
+    guard: tokio::sync::MutexGuard<'a, Option<Result<(), RpcError>>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum SessionCloseState {
+    ReturnCached(Result<(), RpcError>),
+    StartClosing,
+}
+
+fn ensure_session_open(closed: bool) -> Result<(), RpcError> {
+    if closed {
+        return Err(RpcError::InvalidRequest(SESSION_CLOSED_MESSAGE.to_owned()));
+    }
+    Ok(())
+}
+
+pub(super) fn next_close_state(cached: Option<&Result<(), RpcError>>) -> SessionCloseState {
+    match cached {
+        Some(result) => SessionCloseState::ReturnCached(result.clone()),
+        None => SessionCloseState::StartClosing,
+    }
+}
+
+impl SessionState {
+    pub(super) fn new() -> Self {
+        Self {
+            closed: Arc::new(AtomicBool::new(false)),
+            close_result: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub(super) fn ensure_open_for_prompt(&self) -> Result<(), PromptRunError> {
+        ensure_session_open(self.is_closed()).map_err(PromptRunError::Rpc)
+    }
+
+    pub(super) fn ensure_open_for_rpc(&self) -> Result<(), RpcError> {
+        ensure_session_open(self.is_closed())
+    }
+
+    async fn acquire_close_permit(&self) -> SessionClosePermit<'_> {
+        SessionClosePermit {
+            guard: self.close_result.lock().await,
+        }
+    }
+
+    pub(super) fn mark_closed(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+}
+
+impl SessionClosePermit<'_> {
+    fn next_state(&self) -> SessionCloseState {
+        next_close_state(self.guard.as_ref())
+    }
+
+    fn store_result(mut self, result: Result<(), RpcError>) -> Result<(), RpcError> {
+        *self.guard = Some(result.clone());
+        result
+    }
 }
 
 impl Session {
@@ -26,27 +99,27 @@ impl Session {
             runtime,
             thread_id,
             config,
-            closed: Arc::new(AtomicBool::new(false)),
-            close_result: Arc::new(Mutex::new(None)),
+            state: SessionState::new(),
         }
     }
 
     /// Returns true when this local session handle is closed.
     /// Allocation: none. Complexity: O(1).
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
+        self.state.is_closed()
     }
 
     /// Continue this session with one prompt.
     /// Side effects: sends turn/start RPC calls on one already-loaded thread.
     /// Allocation: PromptRunParams clone payloads (cwd/model/sandbox/attachments). Complexity: O(n), n = attachment count + prompt length.
     pub async fn ask(&self, prompt: impl Into<String>) -> Result<PromptRunResult, PromptRunError> {
-        ensure_session_open_for_prompt(self.is_closed())?;
+        self.state.ensure_open_for_prompt()?;
+        let prepared = session_prepared_prompt_run(&self.config, prompt);
         self.runtime
             .run_prompt_on_loaded_thread_with_hooks(
                 &self.thread_id,
-                session_prompt_params(&self.config, prompt),
-                Some(&self.config.hooks),
+                prepared.params,
+                Some(prepared.hooks.as_ref()),
             )
             .await
     }
@@ -57,14 +130,25 @@ impl Session {
         &self,
         prompt: impl Into<String>,
     ) -> Result<PromptRunStream, PromptRunError> {
-        ensure_session_open_for_prompt(self.is_closed())?;
+        self.state.ensure_open_for_prompt()?;
+        let prepared = session_prepared_prompt_run(&self.config, prompt);
         self.runtime
             .run_prompt_on_loaded_thread_stream_with_hooks(
                 &self.thread_id,
-                session_prompt_params(&self.config, prompt),
-                Some(&self.config.hooks),
+                prepared.params,
+                Some(prepared.hooks.as_ref()),
             )
             .await
+    }
+
+    /// Continue this session with one prompt and wait for the scoped stream to finish.
+    /// Side effects: sends turn/start RPC calls on one already-loaded thread and drains the matching turn stream to completion.
+    /// Allocation: PromptRunParams clone payloads (cwd/model/sandbox/attachments). Complexity: O(n), n = attachment count + prompt length.
+    pub async fn ask_wait(
+        &self,
+        prompt: impl Into<String>,
+    ) -> Result<PromptRunResult, PromptRunError> {
+        self.ask_stream(prompt).await?.finish().await
     }
 
     /// Continue this session with one prompt while overriding selected turn options.
@@ -74,7 +158,7 @@ impl Session {
         &self,
         params: PromptRunParams,
     ) -> Result<PromptRunResult, PromptRunError> {
-        ensure_session_open_for_prompt(self.is_closed())?;
+        self.state.ensure_open_for_prompt()?;
         self.runtime
             .run_prompt_on_loaded_thread_with_hooks(
                 &self.thread_id,
@@ -92,12 +176,15 @@ impl Session {
         prompt: impl Into<String>,
         profile: RunProfile,
     ) -> Result<PromptRunResult, PromptRunError> {
-        ensure_session_open_for_prompt(self.is_closed())?;
-        let (params, profile_hooks) =
-            profile_to_prompt_params_with_hooks(self.config.cwd.clone(), prompt, profile);
-        let merged_hooks = merge_hook_configs(&self.config.hooks, &profile_hooks);
+        self.state.ensure_open_for_prompt()?;
+        let prepared = prepared_prompt_run_from_profile(self.config.cwd.clone(), prompt, profile);
+        let merged_hooks = merge_hook_configs(&self.config.hooks, prepared.hooks.as_ref());
         self.runtime
-            .run_prompt_on_loaded_thread_with_hooks(&self.thread_id, params, Some(&merged_hooks))
+            .run_prompt_on_loaded_thread_with_hooks(
+                &self.thread_id,
+                prepared.params,
+                Some(&merged_hooks),
+            )
             .await
     }
 
@@ -111,7 +198,7 @@ impl Session {
     /// Side effects: sends turn/interrupt RPC call to app-server.
     /// Allocation: one small JSON payload in runtime layer. Complexity: O(1).
     pub async fn interrupt_turn(&self, turn_id: &str) -> Result<(), RpcError> {
-        ensure_session_open_for_rpc(self.is_closed())?;
+        self.state.ensure_open_for_rpc()?;
         self.runtime.turn_interrupt(&self.thread_id, turn_id).await
     }
 
@@ -119,30 +206,14 @@ impl Session {
     /// Side effects: sends thread/archive RPC call to app-server.
     /// Allocation: one small JSON payload in runtime layer. Complexity: O(1).
     pub async fn close(&self) -> Result<(), RpcError> {
-        let mut guard = self.close_result.lock().await;
-        if let Some(result) = guard.as_ref() {
-            return result.clone();
+        let permit = self.state.acquire_close_permit().await;
+        match permit.next_state() {
+            SessionCloseState::ReturnCached(result) => return result,
+            SessionCloseState::StartClosing => {}
         }
 
-        self.closed.store(true, Ordering::Release);
+        self.state.mark_closed();
         let result = self.runtime.thread_archive(&self.thread_id).await;
-        *guard = Some(result.clone());
-        result
+        permit.store_result(result)
     }
-}
-
-pub(super) fn ensure_session_open_for_prompt(closed: bool) -> Result<(), PromptRunError> {
-    if closed {
-        return Err(PromptRunError::Rpc(RpcError::InvalidRequest(
-            "session is closed".to_owned(),
-        )));
-    }
-    Ok(())
-}
-
-pub(super) fn ensure_session_open_for_rpc(closed: bool) -> Result<(), RpcError> {
-    if closed {
-        return Err(RpcError::InvalidRequest("session is closed".to_owned()));
-    }
-    Ok(())
 }

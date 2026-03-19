@@ -1,6 +1,6 @@
 # SPEC
 
-Status: active repository-level contract for the `0.5.x` line
+Status: active repository-level contract for the `0.6.1` release
 
 ## 1. Product Identity
 

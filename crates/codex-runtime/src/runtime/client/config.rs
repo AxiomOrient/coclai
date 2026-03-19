@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,6 +11,9 @@ use super::CompatibilityGuard;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientConfig {
     pub cli_bin: PathBuf,
+    pub process_env: HashMap<String, String>,
+    pub process_cwd: Option<PathBuf>,
+    pub app_server_args: Vec<String>,
     pub compatibility_guard: CompatibilityGuard,
     pub initialize_capabilities: InitializeCapabilities,
     pub hooks: RuntimeHookConfig,
@@ -19,6 +23,9 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             cli_bin: PathBuf::from("codex"),
+            process_env: HashMap::new(),
+            process_cwd: None,
+            app_server_args: Vec::new(),
             compatibility_guard: CompatibilityGuard::default(),
             initialize_capabilities: InitializeCapabilities::default(),
             hooks: RuntimeHookConfig::default(),
@@ -35,6 +42,45 @@ impl ClientConfig {
     /// Override CLI executable path.
     pub fn with_cli_bin(mut self, cli_bin: impl Into<PathBuf>) -> Self {
         self.cli_bin = cli_bin.into();
+        self
+    }
+
+    /// Replace process environment overrides for the spawned app-server child.
+    pub fn with_process_envs(
+        mut self,
+        process_env: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.process_env = process_env
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self
+    }
+
+    /// Set one process environment override for the spawned app-server child.
+    pub fn with_process_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.process_env.insert(key.into(), value.into());
+        self
+    }
+
+    /// Override the working directory used to spawn the app-server child process.
+    pub fn with_process_cwd(mut self, process_cwd: impl Into<PathBuf>) -> Self {
+        self.process_cwd = Some(process_cwd.into());
+        self
+    }
+
+    /// Replace extra args appended after the fixed `app-server` subcommand.
+    pub fn with_app_server_args(
+        mut self,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.app_server_args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Add one extra arg appended after the fixed `app-server` subcommand.
+    pub fn with_app_server_arg(mut self, arg: impl Into<String>) -> Self {
+        self.app_server_args.push(arg.into());
         self
     }
 

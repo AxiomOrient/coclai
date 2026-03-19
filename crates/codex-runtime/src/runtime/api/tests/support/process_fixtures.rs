@@ -968,6 +968,86 @@ for line in sys.stdin:
     crate::test_fixtures::python_inline_process(script)
 }
 
+pub(crate) fn python_run_prompt_lagged_cancelled_process() -> StdioProcessSpec {
+    let script = r#"
+import json
+import sys
+
+def make_thread(thread_id):
+    return {
+        "id": thread_id,
+        "cliVersion": "0.104.0",
+        "createdAt": 1700000000,
+        "cwd": "/tmp",
+        "modelProvider": "openai",
+        "path": f"/tmp/threads/{thread_id}.jsonl",
+        "preview": "hello",
+        "source": "app-server",
+        "turns": [],
+        "updatedAt": 1700000001,
+    }
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    method = msg.get("method")
+    rpc_id = msg.get("id")
+    params = msg.get("params") or {}
+
+    if method == "initialize" and rpc_id is not None:
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ready": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if rpc_id is None:
+        continue
+
+    if method == "thread/start":
+        thread_id = "thr_lagged_cancelled"
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": thread_id}}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"thread/started","params":{"threadId":thread_id}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "turn/start":
+        thread_id = params.get("threadId", "thr_lagged_cancelled")
+        turn_id = "turn_lagged_cancelled"
+        sys.stdout.write(json.dumps({"method":"turn/started","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        for i in range(8):
+            sys.stdout.write(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_lagged","delta":f"chunk-{i}"}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"turn/cancelled","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"item/started","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_tail","itemType":"reasoning"}}) + "\n")
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"turn": {"id": turn_id}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/read":
+        thread_id = params.get("threadId", "thr_lagged_cancelled")
+        thread = make_thread(thread_id)
+        if params.get("includeTurns"):
+            thread["turns"] = [{
+                "id": "turn_lagged_cancelled",
+                "status": "cancelled",
+                "items": [],
+            }]
+        out = {"id": rpc_id, "result": {"thread": thread}}
+        sys.stdout.write(json.dumps(out) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"echoMethod": method, "params": params}}) + "\n")
+    sys.stdout.flush()
+"#;
+
+    crate::test_fixtures::python_inline_process(script)
+}
+
 pub(crate) async fn spawn_mock_runtime() -> Runtime {
     let cfg = RuntimeConfig::new(python_api_mock_process());
     Runtime::spawn_local(cfg).await.expect("spawn runtime")
@@ -1032,6 +1112,12 @@ pub(crate) async fn spawn_run_prompt_lagged_completion_runtime() -> Runtime {
 pub(crate) async fn spawn_run_prompt_lagged_completion_slow_thread_read_runtime() -> Runtime {
     let mut cfg =
         RuntimeConfig::new(python_run_prompt_lagged_completion_slow_thread_read_process());
+    cfg.live_channel_capacity = 1;
+    Runtime::spawn_local(cfg).await.expect("spawn runtime")
+}
+
+pub(crate) async fn spawn_run_prompt_lagged_cancelled_runtime() -> Runtime {
+    let mut cfg = RuntimeConfig::new(python_run_prompt_lagged_cancelled_process());
     cfg.live_channel_capacity = 1;
     Runtime::spawn_local(cfg).await.expect("spawn runtime")
 }

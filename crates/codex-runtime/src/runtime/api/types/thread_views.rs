@@ -7,6 +7,8 @@ use super::input::{ItemId, ThreadId, TurnId};
 pub enum ThreadTurnStatus {
     #[serde(rename = "completed")]
     Completed,
+    #[serde(rename = "cancelled")]
+    Cancelled,
     #[serde(rename = "interrupted")]
     Interrupted,
     #[serde(rename = "failed")]

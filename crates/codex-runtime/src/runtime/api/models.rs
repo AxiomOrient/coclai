@@ -2,13 +2,23 @@ use std::time::Duration;
 
 use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::broadcast::Receiver as BroadcastReceiver;
+use tokio::time::Instant;
 
 use crate::plugin::{BlockReason, HookPhase};
+use crate::runtime::core::Runtime;
 use crate::runtime::errors::{RpcError, RuntimeError};
+use crate::runtime::events::{
+    AgentMessageDeltaNotification, Envelope, TurnCancelledNotification, TurnCompletedNotification,
+    TurnFailedNotification, TurnInterruptedNotification,
+};
+use crate::runtime::hooks::RuntimeHookConfig;
+use crate::runtime::turn_lifecycle::LaggedTurnTerminal;
+use crate::runtime::turn_output::TurnStreamCollector;
 
 use super::{
-    ApprovalPolicy, PromptAttachment, ReasoningEffort, SandboxPolicy, ThreadId, TurnId,
-    DEFAULT_REASONING_EFFORT,
+    flow::HookExecutionState, turn_error::PromptTurnErrorSignal, ApprovalPolicy, PromptAttachment,
+    ReasoningEffort, SandboxPolicy, ThreadId, TurnId, DEFAULT_REASONING_EFFORT,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,6 +159,41 @@ pub struct PromptRunResult {
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
     pub assistant_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PromptRunStreamEvent {
+    AgentMessageDelta(AgentMessageDeltaNotification),
+    TurnCompleted(TurnCompletedNotification),
+    TurnFailed(TurnFailedNotification),
+    TurnInterrupted(TurnInterruptedNotification),
+    TurnCancelled(TurnCancelledNotification),
+}
+
+pub(crate) struct PromptRunStreamState {
+    pub(crate) last_turn_error: Option<PromptTurnErrorSignal>,
+    pub(crate) lagged_terminal: Option<LaggedTurnTerminal>,
+    pub(crate) final_result: Option<Result<PromptRunResult, PromptRunError>>,
+}
+
+pub(crate) struct PromptStreamCleanupState {
+    pub(crate) run_cwd: String,
+    pub(crate) run_model: Option<String>,
+    pub(crate) scoped_hooks: Option<RuntimeHookConfig>,
+    pub(crate) hook_state: Option<HookExecutionState>,
+    pub(crate) cleaned_up: bool,
+}
+
+pub struct PromptRunStream {
+    pub(crate) runtime: Runtime,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) turn_id: TurnId,
+    pub(crate) live_rx: BroadcastReceiver<Envelope>,
+    pub(crate) stream: TurnStreamCollector,
+    pub(crate) state: PromptRunStreamState,
+    pub(crate) deadline: Instant,
+    pub(crate) timeout: Duration,
+    pub(crate) cleanup: PromptStreamCleanupState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

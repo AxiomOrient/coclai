@@ -37,7 +37,7 @@ surface (`runtime::{Client, Session, ClientConfig, SessionConfig, RunProfile, Pr
 Published crate dependency:
 ```toml
 [dependencies]
-codex-runtime = "0.6.0"
+codex-runtime = "0.6.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -199,6 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - When you need more control, use `RunProfile`, `SessionConfig`, `ClientConfig`, or `RuntimeConfig`.
 - Use `AppServer` typed helpers for stable low-level parity.
 - Use raw JSON-RPC for experimental or custom methods.
+- Per-client app-server launch control stays on `ClientConfig` (`process_env`, `process_cwd`, extra `app_server_args`) without turning `Client` into an arbitrary child-process wrapper.
 
 ## Public Modules
 
@@ -216,6 +217,12 @@ Important runtime submodules available for direct use when re-exports are not en
 `runtime::errors`, `runtime::events`, `runtime::hooks`, `runtime::metrics`,
 `runtime::rpc`, `runtime::rpc_contract`, `runtime::sink`, `runtime::state`,
 `runtime::transport`, `runtime::turn_output`
+
+### Scoped session streaming
+
+`Session::ask_stream(prompt)` starts one turn on an already loaded session and returns a scoped handle with `thread_id()`, `turn_id()`, `recv().await`, and `finish().await`.
+
+Use it when you need typed turn-scoped streaming on the canonical `runtime::{Client, Session}` bridge without reimplementing global `subscribe_live()` filtering. `finish()` is the normal completion path; dropping an unfinished stream triggers a best-effort interrupt.
 
 ## Built-in Higher-Order Modules
 

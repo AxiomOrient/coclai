@@ -35,7 +35,8 @@ fn resolve_attachment_path(cwd: &str, path: &str) -> PathBuf {
 mod types;
 
 pub use models::{
-    PromptRunError, PromptRunParams, PromptRunResult, PromptTurnFailure, PromptTurnTerminalState,
+    PromptRunError, PromptRunParams, PromptRunResult, PromptRunStream, PromptRunStreamEvent,
+    PromptTurnFailure, PromptTurnTerminalState,
 };
 pub(crate) use types::{
     normalize_sandbox_mode_alias, sandbox_mode_to_wire_value, sandbox_policy_to_wire_value,

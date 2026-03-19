@@ -12,14 +12,16 @@ use crate::runtime::turn_output::{TurnStreamCollector, TurnTerminalEvent};
 pub(crate) enum LaggedTurnTerminal {
     Completed { assistant_text: Option<String> },
     Failed { message: Option<String> },
+    Cancelled,
     Interrupted,
 }
 
 impl LaggedTurnTerminal {
-    fn as_terminal_event(&self) -> TurnTerminalEvent {
+    pub(crate) fn as_terminal_event(&self) -> TurnTerminalEvent {
         match self {
             Self::Completed { .. } => TurnTerminalEvent::Completed,
             Self::Failed { .. } => TurnTerminalEvent::Failed,
+            Self::Cancelled => TurnTerminalEvent::Cancelled,
             Self::Interrupted => TurnTerminalEvent::Interrupted,
         }
     }

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::json;
+use tokio::time::sleep;
 
 use super::{
     ensure_session_open_for_prompt, ensure_session_open_for_rpc, parse_initialize_user_agent,
@@ -12,7 +13,8 @@ use super::{
 };
 use crate::plugin::{HookAction, HookContext, HookIssue, HookPhase, PostHook, PreHook};
 use crate::runtime::api::{
-    ApprovalPolicy, PromptAttachment, ReasoningEffort, SandboxPolicy, SandboxPreset,
+    ApprovalPolicy, PromptAttachment, PromptRunStreamEvent, ReasoningEffort, SandboxPolicy,
+    SandboxPreset,
 };
 use crate::runtime::hooks::RuntimeHookConfig;
 use crate::runtime::{InitializeCapabilities, PromptRunParams};
@@ -278,6 +280,253 @@ for line in sys.stdin:
     path
 }
 
+fn write_launch_probe_cli_script(root: &std::path::Path) -> PathBuf {
+    let path = root.join("mock_codex_cli_launch_probe.py");
+    let script = r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    rpc_id = msg.get("id")
+    method = msg.get("method")
+
+    if rpc_id is None:
+        continue
+
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "id": rpc_id,
+            "result": {
+                "ready": True,
+                "userAgent": "Codex Desktop/0.104.0",
+                "argv": sys.argv[1:],
+                "cwd": os.getcwd(),
+                "launchEnv": {
+                    "CODEX_HOME": os.environ.get("CODEX_HOME"),
+                    "AXIOM_FLAG": os.environ.get("AXIOM_FLAG")
+                }
+            }
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+    sys.stdout.flush()
+"#;
+    fs::write(&path, script).expect("write launch probe script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("set script executable");
+    }
+    path
+}
+
+fn write_stream_failure_cli_script(root: &std::path::Path) -> PathBuf {
+    let path = root.join("mock_codex_cli_stream_failure.py");
+    let script = r#"#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    rpc_id = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {}
+
+    if rpc_id is None:
+        continue
+
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "id": rpc_id,
+            "result": {"ready": True, "userAgent": "Codex Desktop/0.104.0"}
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/start":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": "thr_stream_fail"}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "turn/start":
+        thread_id = params.get("threadId") or "thr_stream_fail"
+        turn_id = "turn_stream_fail"
+        sys.stdout.write(json.dumps({"method":"turn/started","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_1","delta":"partial"}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"turn/failed","params":{"threadId":thread_id,"turnId":turn_id,"error":{"code":429,"message":"rate limited"}}}) + "\n")
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"turn": {"id": turn_id}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/archive":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+    sys.stdout.flush()
+"#;
+    fs::write(&path, script).expect("write stream failure script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("set script executable");
+    }
+    path
+}
+
+fn write_stream_interrupt_cli_script(root: &std::path::Path) -> PathBuf {
+    let path = root.join("mock_codex_cli_stream_interrupt.py");
+    let script = r#"#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    rpc_id = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {}
+
+    if rpc_id is None:
+        continue
+
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "id": rpc_id,
+            "result": {"ready": True, "userAgent": "Codex Desktop/0.104.0"}
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/start":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": "thr_stream_interrupt"}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "turn/start":
+        thread_id = params.get("threadId") or "thr_stream_interrupt"
+        turn_id = "turn_stream_interrupt"
+        sys.stdout.write(json.dumps({"method":"turn/started","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"turn/interrupted","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"turn": {"id": turn_id}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+    sys.stdout.flush()
+"#;
+    fs::write(&path, script).expect("write stream interrupt script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("set script executable");
+    }
+    path
+}
+
+fn write_stream_drop_interrupt_cli_script(root: &std::path::Path) -> PathBuf {
+    let path = root.join("mock_codex_cli_stream_drop_interrupt.py");
+    let interrupt_probe_path = root.join("interrupt-observed.txt");
+    let script = r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+interrupt_probe_path = pathlib.Path(__INTERRUPT_PROBE_PATH__)
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+
+    rpc_id = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {}
+
+    if rpc_id is None:
+        continue
+
+    if method == "initialize":
+        sys.stdout.write(json.dumps({
+            "id": rpc_id,
+            "result": {"ready": True, "userAgent": "Codex Desktop/0.104.0"}
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "thread/start":
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"thread": {"id": "thr_stream_drop"}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "turn/start":
+        thread_id = params.get("threadId") or "thr_stream_drop"
+        turn_id = "turn_stream_drop"
+        sys.stdout.write(json.dumps({"method":"turn/started","params":{"threadId":thread_id,"turnId":turn_id}}) + "\n")
+        sys.stdout.write(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"itemId":"item_1","delta":"partial"}}) + "\n")
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"turn": {"id": turn_id}}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    if method == "turn/interrupt":
+        interrupt_probe_path.write_text("observed", encoding="utf-8")
+        sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+        sys.stdout.flush()
+        continue
+
+    sys.stdout.write(json.dumps({"id": rpc_id, "result": {"ok": True}}) + "\n")
+    sys.stdout.flush()
+"#
+    .replace(
+        "__INTERRUPT_PROBE_PATH__",
+        &serde_json::to_string(&interrupt_probe_path).expect("probe path json"),
+    );
+    fs::write(&path, script).expect("write stream drop interrupt script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("set script executable");
+    }
+    path
+}
+
 fn write_pre_tool_use_approval_cli_script(root: &std::path::Path) -> PathBuf {
     let path = root.join("mock_codex_cli_pre_tool_use.py");
     let target_path = serde_json::to_string(
@@ -520,11 +769,24 @@ fn count_phase(phases: &Arc<Mutex<Vec<HookPhase>>>, target: HookPhase) -> usize 
 
 #[test]
 fn config_builder_sets_fields() {
-    let cfg = ClientConfig::new().with_cli_bin("/opt/homebrew/bin/cli");
+    let cfg = ClientConfig::new()
+        .with_cli_bin("/opt/homebrew/bin/cli")
+        .with_process_env("CODEX_HOME", "/tmp/codex-home")
+        .with_process_cwd("/tmp/runtime")
+        .with_app_server_arg("--json");
     assert_eq!(
         cfg.cli_bin,
         std::path::PathBuf::from("/opt/homebrew/bin/cli")
     );
+    assert_eq!(
+        cfg.process_env.get("CODEX_HOME").map(String::as_str),
+        Some("/tmp/codex-home")
+    );
+    assert_eq!(
+        cfg.process_cwd,
+        Some(std::path::PathBuf::from("/tmp/runtime"))
+    );
+    assert_eq!(cfg.app_server_args, vec!["--json".to_owned()]);
     assert_eq!(
         cfg.compatibility_guard,
         CompatibilityGuard {
@@ -608,6 +870,70 @@ fn client_config_initialize_capabilities_are_explicit() {
 fn client_config_enable_experimental_api_sets_capability() {
     let cfg = ClientConfig::new().enable_experimental_api();
     assert!(cfg.initialize_capabilities.experimental_api);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn connect_forwards_process_launch_settings_to_app_server_child() {
+    let temp = TempDir::new("runtime_client_launch_probe");
+    let cli = write_launch_probe_cli_script(&temp.root);
+    let process_cwd = temp.root.join("spawn-cwd");
+    fs::create_dir_all(&process_cwd).expect("create process cwd");
+
+    let client = super::Client::connect(
+        ClientConfig::new()
+            .with_cli_bin(cli)
+            .with_process_envs([
+                (
+                    "CODEX_HOME",
+                    temp.root.join("codex-home").display().to_string(),
+                ),
+                ("AXIOM_FLAG", "enabled".to_owned()),
+            ])
+            .with_process_cwd(process_cwd.clone())
+            .with_app_server_args(["--sample-flag", "demo"]),
+    )
+    .await
+    .expect("client connect");
+
+    let initialize = client
+        .runtime()
+        .initialize_result_snapshot()
+        .expect("initialize snapshot");
+    let expected_process_cwd = process_cwd.canonicalize().expect("canonical process cwd");
+    let actual_process_cwd = PathBuf::from(
+        initialize
+            .get("cwd")
+            .and_then(|value| value.as_str())
+            .expect("launch cwd"),
+    )
+    .canonicalize()
+    .expect("canonical actual cwd");
+    assert_eq!(
+        initialize
+            .get("argv")
+            .and_then(|value| value.as_array())
+            .cloned(),
+        Some(vec![
+            json!("app-server"),
+            json!("--sample-flag"),
+            json!("demo")
+        ])
+    );
+    assert_eq!(actual_process_cwd, expected_process_cwd);
+    assert_eq!(
+        initialize
+            .pointer("/launchEnv/CODEX_HOME")
+            .and_then(|value| value.as_str()),
+        Some(temp.root.join("codex-home").to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        initialize
+            .pointer("/launchEnv/AXIOM_FLAG")
+            .and_then(|value| value.as_str()),
+        Some("enabled")
+    );
+
+    client.shutdown().await.expect("shutdown");
 }
 
 #[test]
@@ -764,6 +1090,166 @@ async fn session_ask_propagates_output_schema_to_turn_start() {
     assert_eq!(echoed, schema);
 
     session.close().await.expect("close");
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_ask_stream_yields_scoped_events_and_final_result() {
+    let (temp, client) =
+        connect_mock_client("runtime_client_session_ask_stream", ClientConfig::new()).await;
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start session");
+
+    let mut stream = session.ask_stream("stream-ok").await.expect("ask stream");
+    assert_eq!(stream.thread_id(), "thr_client");
+    assert_eq!(stream.turn_id(), "turn_client");
+
+    let first = stream
+        .recv()
+        .await
+        .expect("stream recv")
+        .expect("first event");
+    assert!(matches!(
+        first,
+        PromptRunStreamEvent::AgentMessageDelta(ref delta) if delta.delta == "stream-ok"
+    ));
+
+    let second = stream
+        .recv()
+        .await
+        .expect("stream recv")
+        .expect("second event");
+    assert!(matches!(
+        second,
+        PromptRunStreamEvent::TurnCompleted(ref done)
+            if done.thread_id == "thr_client" && done.turn_id == "turn_client"
+    ));
+
+    assert!(stream.recv().await.expect("stream end").is_none());
+
+    let result = stream.finish().await.expect("stream finish");
+    assert_eq!(result.thread_id, "thr_client");
+    assert_eq!(result.turn_id, "turn_client");
+    assert_eq!(result.assistant_text, "stream-ok");
+
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_ask_stream_finishes_with_turn_failure_context() {
+    let temp = TempDir::new("runtime_client_stream_failure");
+    let cli = write_stream_failure_cli_script(&temp.root);
+    let client = super::Client::connect(ClientConfig::new().with_cli_bin(cli))
+        .await
+        .expect("client connect");
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start session");
+
+    let mut stream = session.ask_stream("ignored").await.expect("ask stream");
+    let first = stream
+        .recv()
+        .await
+        .expect("delta recv")
+        .expect("delta event");
+    assert!(matches!(
+        first,
+        PromptRunStreamEvent::AgentMessageDelta(ref delta) if delta.delta == "partial"
+    ));
+
+    let second = stream
+        .recv()
+        .await
+        .expect("failed recv")
+        .expect("failed event");
+    assert!(matches!(
+        second,
+        PromptRunStreamEvent::TurnFailed(ref failed)
+            if failed.code == Some(429) && failed.message.as_deref() == Some("rate limited")
+    ));
+
+    let err = stream.finish().await.expect_err("stream should fail");
+    assert!(matches!(
+        err,
+        crate::runtime::api::PromptRunError::TurnFailedWithContext(ref failure)
+            if failure.code == Some(429) && failure.message == "rate limited"
+    ));
+
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_ask_stream_surfaces_turn_interrupted_event() {
+    let temp = TempDir::new("runtime_client_stream_interrupt");
+    let cli = write_stream_interrupt_cli_script(&temp.root);
+    let client = super::Client::connect(ClientConfig::new().with_cli_bin(cli))
+        .await
+        .expect("client connect");
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start session");
+
+    let mut stream = session.ask_stream("ignored").await.expect("ask stream");
+    let event = stream
+        .recv()
+        .await
+        .expect("interrupted recv")
+        .expect("interrupted event");
+    assert!(matches!(
+        event,
+        PromptRunStreamEvent::TurnInterrupted(ref interrupted)
+            if interrupted.thread_id == "thr_stream_interrupt"
+                && interrupted.turn_id == "turn_stream_interrupt"
+    ));
+
+    let err = stream.finish().await.expect_err("stream should interrupt");
+    assert!(matches!(
+        err,
+        crate::runtime::api::PromptRunError::TurnInterrupted
+    ));
+
+    client.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_prompt_stream_sends_best_effort_interrupt() {
+    let temp = TempDir::new("runtime_client_stream_drop_interrupt");
+    let cli = write_stream_drop_interrupt_cli_script(&temp.root);
+    let interrupt_probe_path = temp.root.join("interrupt-observed.txt");
+    let client = super::Client::connect(ClientConfig::new().with_cli_bin(cli))
+        .await
+        .expect("client connect");
+
+    let session = client
+        .start_session(SessionConfig::new(temp_cwd(&temp)))
+        .await
+        .expect("start session");
+
+    let mut stream = session.ask_stream("ignored").await.expect("ask stream");
+    let event = stream
+        .recv()
+        .await
+        .expect("delta recv")
+        .expect("delta event");
+    assert!(matches!(
+        event,
+        PromptRunStreamEvent::AgentMessageDelta(ref delta) if delta.delta == "partial"
+    ));
+    drop(stream);
+
+    sleep(Duration::from_millis(200)).await;
+    assert!(
+        interrupt_probe_path.exists(),
+        "dropping an unfinished stream should send best-effort interrupt"
+    );
+
     client.shutdown().await.expect("shutdown");
 }
 

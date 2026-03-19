@@ -11,7 +11,7 @@ use super::{
 };
 
 #[derive(Clone, Debug)]
-pub(super) struct HookExecutionState {
+pub(crate) struct HookExecutionState {
     pub(super) correlation_id: String,
     pub(super) report: HookReport,
     pub(super) metadata: Value,

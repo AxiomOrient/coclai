@@ -5,7 +5,7 @@ use crate::runtime::events::Envelope;
 use super::{PromptTurnFailure, PromptTurnTerminalState};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct PromptTurnErrorSignal {
+pub(crate) struct PromptTurnErrorSignal {
     source_method: String,
     code: Option<i64>,
     message: String,

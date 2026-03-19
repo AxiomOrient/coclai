@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::runtime::api::{PromptRunError, PromptRunParams, PromptRunResult};
+use crate::runtime::api::{PromptRunError, PromptRunParams, PromptRunResult, PromptRunStream};
 use crate::runtime::core::Runtime;
 use crate::runtime::errors::RpcError;
 use crate::runtime::hooks::merge_hook_configs;
@@ -44,6 +44,22 @@ impl Session {
         ensure_session_open_for_prompt(self.is_closed())?;
         self.runtime
             .run_prompt_on_loaded_thread_with_hooks(
+                &self.thread_id,
+                session_prompt_params(&self.config, prompt),
+                Some(&self.config.hooks),
+            )
+            .await
+    }
+
+    /// Continue this session with one prompt and receive scoped typed turn events.
+    /// Side effects: sends turn/start RPC calls on one already-loaded thread and consumes only matching live events.
+    pub async fn ask_stream(
+        &self,
+        prompt: impl Into<String>,
+    ) -> Result<PromptRunStream, PromptRunError> {
+        ensure_session_open_for_prompt(self.is_closed())?;
+        self.runtime
+            .run_prompt_on_loaded_thread_stream_with_hooks(
                 &self.thread_id,
                 session_prompt_params(&self.config, prompt),
                 Some(&self.config.hooks),

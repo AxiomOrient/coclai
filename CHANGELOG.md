@@ -5,18 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2026-03-17
+## [0.6.1] - 2026-03-17
 
 ### Added
-- randomized user-like prompt-path stress coverage across `run_prompt`, `run_prompt_simple`, `run_prompt_in_thread`, noise isolation, and effort variants
-- randomized multi-tenant web session stress coverage for repeated turns, cross-tenant denial, and event-isolation checks
+- `ClientConfig` builders for per-process app-server launch environment, cwd, and extra args
+- `Session::ask_stream(...)` with typed turn-scoped streaming and final `finish()` result
+- typed live event extractors for agent message deltas and common turn terminal events
 
 ### Changed
-- documentation now points to the root `SPEC.md` as the durable repository contract across the main and localized entrypoints
-- completed planning artifacts were removed from the active release documentation surface
+- prompt terminal resolution now shares one data-first path across streaming and non-streaming execution
+- dropping an unfinished prompt stream now sends a best-effort interrupt instead of silently leaving the turn running
+- release docs and API reference now describe the current 0.6.1 public surface
 
 ### Removed
-- legacy rename-audit documentation and completed planning artifacts from the release tree
+- release note drift from the published 0.6.1 surface
 
 ## [0.5.0] - 2026-03-13
 

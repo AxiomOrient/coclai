@@ -50,6 +50,89 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 2
 fi
 
+check_release_docs_sync() {
+  python3 - <<'PY'
+from pathlib import Path
+import re
+import sys
+
+
+def fail(message: str) -> None:
+    print(f"[release-docs] {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def read(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+
+def extract_version(text: str, section: str) -> str:
+    pattern = rf'(?ms)^\[{re.escape(section)}\]\n(?:(?!^\[).*\n)*?^version = "([^"]+)"'
+    match = re.search(pattern, text)
+    if not match:
+        fail(f"unable to read version from [{section}]")
+    return match.group(1)
+
+
+workspace_version = extract_version(read("Cargo.toml"), "workspace.package")
+crate_version = extract_version(read("crates/codex-runtime/Cargo.toml"), "package")
+
+if workspace_version != crate_version:
+    fail(
+        f"workspace version {workspace_version} does not match crate version {crate_version}"
+    )
+
+lock_text = read("Cargo.lock")
+lock_match = re.search(
+    r'(?ms)^\[\[package\]\]\nname = "codex-runtime"\nversion = "([^"]+)"',
+    lock_text,
+)
+if not lock_match:
+    fail("Cargo.lock is missing the codex-runtime package entry")
+lock_version = lock_match.group(1)
+if lock_version != workspace_version:
+    fail(
+        f"Cargo.lock version {lock_version} does not match workspace version {workspace_version}"
+    )
+
+readme = read("README.md")
+if f'codex-runtime = "{workspace_version}"' not in readme:
+    fail(f'README.md is missing dependency version "{workspace_version}"')
+
+changelog = read("CHANGELOG.md")
+changelog_match = re.search(r"^## \[([^\]]+)\]", changelog, re.MULTILINE)
+if not changelog_match:
+    fail("CHANGELOG.md is missing a release heading")
+if changelog_match.group(1) != workspace_version:
+    fail(
+        f"CHANGELOG.md latest release {changelog_match.group(1)} does not match {workspace_version}"
+    )
+
+release_doc = Path("docs/releases") / f"{workspace_version}.md"
+if not release_doc.exists():
+    fail(f"missing release note {release_doc}")
+release_title = re.search(r"^# codex-runtime ([^\n]+)", read(str(release_doc)), re.MULTILINE)
+if not release_title:
+    fail(f"{release_doc} is missing the release title")
+if release_title.group(1) != workspace_version:
+    fail(
+        f"{release_doc} title version {release_title.group(1)} does not match {workspace_version}"
+    )
+
+spec = read("SPEC.md")
+spec_status = re.search(r"^Status:\s*(.+)$", spec, re.MULTILINE)
+if not spec_status:
+    fail("SPEC.md is missing a status line")
+minor_line = ".".join(workspace_version.split(".")[:2]) + ".x"
+if f"`{workspace_version}`" not in spec_status.group(1) and f"`{minor_line}`" not in spec_status.group(1):
+    fail(
+        "SPEC.md status line must mention the current release version or current major.minor line"
+    )
+
+print(f"[release-docs] version sync ok: {workspace_version}")
+PY
+}
+
 run_real_server_gate_with_retries() {
   local max_attempts="$1"
   local backoff_sec="$2"
@@ -75,6 +158,9 @@ cargo fmt --check
 
 echo "[release] gate: clippy"
 cargo clippy --workspace --all-targets -- -D warnings
+
+echo "[release] gate: release docs"
+check_release_docs_sync
 
 echo "[release] gate: product hygiene"
 ./scripts/check_product_hygiene.sh

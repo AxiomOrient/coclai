@@ -40,6 +40,9 @@ impl Client {
     pub async fn connect(config: ClientConfig) -> Result<Self, ClientError> {
         let mut process = StdioProcessSpec::new(config.cli_bin.clone());
         process.args = vec!["app-server".to_owned()];
+        process.args.extend(config.app_server_args.iter().cloned());
+        process.env = config.process_env.clone();
+        process.cwd = config.process_cwd.clone();
 
         let runtime = Runtime::spawn_local(
             RuntimeConfig::new(process)

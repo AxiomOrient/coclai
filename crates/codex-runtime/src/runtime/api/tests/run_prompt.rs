@@ -5,13 +5,14 @@ use std::time::{Duration, Instant};
 use crate::plugin::{HookAction, HookContext, HookIssue, HookIssueClass, HookPhase, PreHook};
 use crate::runtime::{RuntimeConfig, RuntimeHookConfig};
 use serde_json::{json, Value};
+use tokio::time::sleep;
 
 use super::super::*;
 use super::support::{
     python_api_mock_process, python_session_mutation_probe_process,
     spawn_run_prompt_cross_thread_noise_runtime, spawn_run_prompt_effort_probe_runtime,
     spawn_run_prompt_error_runtime, spawn_run_prompt_interrupt_probe_runtime,
-    spawn_run_prompt_lagged_completion_runtime,
+    spawn_run_prompt_lagged_cancelled_runtime, spawn_run_prompt_lagged_completion_runtime,
     spawn_run_prompt_lagged_completion_slow_thread_read_runtime,
     spawn_run_prompt_mutation_probe_runtime, spawn_run_prompt_runtime,
     spawn_run_prompt_runtime_with_hooks, spawn_run_prompt_streaming_timeout_runtime,
@@ -702,6 +703,20 @@ async fn run_prompt_recovers_when_live_stream_lags_past_terminal_event() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn run_prompt_recovers_when_live_stream_lags_past_cancelled_terminal() {
+    let runtime = spawn_run_prompt_lagged_cancelled_runtime().await;
+
+    let err = runtime
+        .run_prompt(PromptRunParams::new("/tmp", "lagged cancelled probe"))
+        .await
+        .expect_err("run prompt should surface cancelled lagged terminal");
+
+    assert!(matches!(err, PromptRunError::TurnInterrupted));
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn run_prompt_lagged_thread_read_respects_absolute_deadline() {
     let runtime = spawn_run_prompt_lagged_completion_slow_thread_read_runtime().await;
     let timeout_value = Duration::from_millis(120);
@@ -753,6 +768,52 @@ async fn run_prompt_timeout_emits_turn_interrupt_request() {
     assert!(
         saw_interrupt,
         "timeout path must send turn/interrupt request"
+    );
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_stream_drop_runs_post_turn_hooks() {
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hooks = RuntimeHookConfig::new().with_post_hook(Arc::new(RecordingPostHook {
+        name: "post_recorder",
+        events: Arc::clone(&events),
+        fail_phase: None,
+    }));
+    let runtime = spawn_run_prompt_runtime_with_hooks(hooks).await;
+
+    let thread = runtime
+        .thread_start(ThreadStartParams::default())
+        .await
+        .expect("thread start");
+    let stream = runtime
+        .run_prompt_on_loaded_thread_stream_with_hooks(
+            &thread.thread_id,
+            PromptRunParams::new("/tmp", "drop prompt stream"),
+            None,
+        )
+        .await
+        .expect("start prompt stream");
+
+    drop(stream);
+    let mut saw_post_turn = false;
+    for _ in 0..20 {
+        if events
+            .lock()
+            .expect("events lock")
+            .iter()
+            .any(|event| event == "post:PostTurn")
+        {
+            saw_post_turn = true;
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    assert!(
+        saw_post_turn,
+        "dropping an unfinished stream must still run post-turn hooks"
     );
 
     runtime.shutdown().await.expect("shutdown");

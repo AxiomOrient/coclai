@@ -329,14 +329,21 @@ Contract:
 
 ### `ClientConfig`
 
-Fields: `cli_bin`, `compatibility_guard`, `initialize_capabilities`, `hooks`
+Fields: `cli_bin`, `process_env`, `process_cwd`, `app_server_args`, `compatibility_guard`, `initialize_capabilities`, `hooks`
 
 Key builders:
 - `with_cli_bin(...)`, `with_compatibility_guard(...)`, `without_compatibility_guard()`
+- `with_process_env(...)`, `with_process_envs(...)`, `with_process_cwd(...)`
+- `with_app_server_arg(...)`, `with_app_server_args(...)`
 - `with_initialize_capabilities(...)`, `enable_experimental_api()`
 - `with_hooks(...)`, `with_pre_hook(...)`, `with_post_hook(...)`, `with_pre_tool_use_hook(...)`
 
 Default CLI binary: `codex` (resolved via `PATH`).
+
+Contract:
+- `Client` still spawns the configured CLI in `app-server` mode.
+- `app_server_args` are appended after the fixed `app-server` subcommand.
+- `process_env` and `process_cwd` affect only the spawned child process, not the parent process.
 
 ### `InitializeCapabilities`
 
@@ -385,6 +392,7 @@ Note: `cwd` can only be set at construction time. To change cwd, create a new `S
 Methods:
 - `is_closed()` — check whether the session has been closed
 - `ask(prompt)` — run one turn with session defaults
+- `ask_stream(prompt)` — run one turn and receive typed turn-scoped streaming events
 - `ask_with(params)` — run one turn with explicit `PromptRunParams`
 - `ask_with_profile(prompt, profile)` — run one turn with a profile override
 - `profile()` — return a `RunProfile` snapshot of the session defaults
@@ -395,6 +403,8 @@ Contract:
 1. `close()` is single-flight and reuses the first archive result.
 2. Closed sessions reject new prompt or RPC actions locally without sending any requests.
 3. Loaded sessions do not send a second `thread/resume` for `ask*`.
+4. `ask_stream()` scopes live delivery to one turn and keeps `Runtime::subscribe_live()` as the raw escape hatch.
+5. `finish()` is the normal completion path for `PromptRunStream`; dropping an unfinished stream sends a best-effort interrupt.
 
 ## AppServer API
 
@@ -583,6 +593,23 @@ Validation rules:
 - Typed helper extraction:
   - `extract_skills_changed_notification(&Envelope)`
   - `extract_command_exec_output_delta(&Envelope)`
+  - `extract_agent_message_delta(&Envelope)`
+  - `extract_turn_completed(&Envelope)`
+  - `extract_turn_failed(&Envelope)`
+
+### Prompt stream helper
+
+- `PromptRunStream`
+  - `thread_id()` — target thread id
+  - `turn_id()` — target turn id
+  - `recv()` — typed stream events for the target turn only
+  - `finish()` — drain to the terminal `PromptRunResult`
+- `PromptRunStreamEvent`
+  - `AgentMessageDelta`
+  - `TurnCompleted`
+  - `TurnFailed`
+  - `TurnInterrupted`
+  - `TurnCancelled`
 
 ### Server-request routing
 
@@ -601,6 +628,7 @@ Known queued methods:
 Contract:
 - Unknown server requests are auto-declined by default.
 - Explicit handling consumes the request queue via `AppServer::take_server_requests()` and replies with `respond_server_request_ok` or `respond_server_request_err`.
+- Live-event approval parsing remains optional convenience work; the canonical approval path is still `ServerRequest`.
 
 ## Validation And Security Contracts
 

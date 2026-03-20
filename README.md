@@ -1,46 +1,37 @@
 # Codex Runtime
 
-`Codex Runtime` is the repository for a Rust wrapper around the local `codex app-server`—the stdio JSON-RPC backend spawned by the `codex` CLI binary.
+`codex-runtime` is a Rust wrapper around the local `codex app-server`, the stdio JSON-RPC backend started by the `codex` CLI.
 
-Current identity:
-- repository and package name: `codex-runtime`
+Repository identity:
+- repository and crate: `codex-runtime`
 - Rust import path: `codex_runtime`
+- current crate version: `0.6.1`
 
-It exposes six layers so you can start simple and reach deeper only when needed:
+The project is intentionally layered so callers can start with one prompt and move down only when they need more control.
 
-| Layer | Entry point | When to use |
-|-------|-------------|-------------|
-| 1 | `quick_run`, `quick_run_with_profile` | One prompt, disposable session |
-| 2 | `Workflow`, `WorkflowConfig` | Repeated runs in one working directory |
-| 3 | `runtime::{Client, Session}` | Explicit session lifecycle, resume, interrupt |
-| 4 | `automation::{spawn, AutomationSpec}` | Schedule repeated turns on one prepared `Session` |
-| 5 | `AppServer` | Direct JSON-RPC with typed helpers and server-request loop |
-| 6 | `runtime::Runtime` or raw JSON-RPC | Full control, live events, experimental access |
-
-## Repository Contract
-
-`codex-runtime` keeps one simple package model in v1:
-
-- one repository
-- one published crate
-- `web` and `artifact` ship as built-in higher-order modules in the default crate
-- `quick_run`, `Workflow`, and `automation` stay convenience layers above the substrate core
-
-For AxiomRunner integration, the canonical worker bridge should stay on the core substrate
-surface (`runtime::{Client, Session, ClientConfig, SessionConfig, RunProfile, PromptRunParams, PromptRunResult, PromptRunError, ServerRequest, ServerRequestConfig}`), with `AppServer` / `rpc_methods` used only when validated low-level parity is needed.
+| Layer | Entry point | Use when |
+|-------|-------------|----------|
+| 1 | `quick_run`, `quick_run_with_profile` | You want one prompt with safe defaults |
+| 2 | `Workflow`, `WorkflowConfig` | You want repeated runs in one working directory |
+| 3 | `runtime::{Client, Session}` | You want explicit session lifecycle and typed config |
+| 4 | `automation::{spawn, AutomationSpec}` | You want repeated turns on one prepared `Session` |
+| 5 | `AppServer` | You want validated low-level JSON-RPC helpers |
+| 6 | `runtime::Runtime` or raw JSON-RPC | You want full runtime control and live events |
 
 ## Install
 
-**Requires:** `codex` CLI >= 0.104.0 installed and available on `$PATH`.
+Requires `codex` CLI `>= 0.104.0` on `$PATH`.
 
-Published crate dependency:
+Published crate:
+
 ```toml
 [dependencies]
 codex-runtime = "0.6.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Local workspace dependency:
+Workspace path:
+
 ```toml
 [dependencies]
 codex-runtime = { path = "crates/codex-runtime" }
@@ -48,7 +39,7 @@ codex-runtime = { path = "crates/codex-runtime" }
 
 ## Safe Defaults
 
-All entry points share the same safe defaults unless explicitly overridden:
+All high-level entry points share the same baseline unless you opt out:
 
 | Setting | Default |
 |---------|---------|
@@ -56,11 +47,14 @@ All entry points share the same safe defaults unless explicitly overridden:
 | sandbox | `read-only` |
 | effort | `medium` |
 | timeout | `120s` |
-| privileged escalation | `false` (requires explicit opt-in) |
+| privileged escalation | `false` |
 
-## High-Level API
+Privileged execution must be enabled explicitly. Tool-use hooks do not bypass sandbox or approval policy.
 
-### `quick_run`
+## Quick Start
+
+### One-shot prompt
+
 ```rust
 use codex_runtime::quick_run;
 
@@ -72,7 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### `Workflow`
+### Reusable workflow
+
 ```rust
 use codex_runtime::{Workflow, WorkflowConfig};
 
@@ -87,14 +82,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let out = workflow.run("Summarize only the public API").await?;
     println!("{}", out.assistant_text);
+
     workflow.shutdown().await?;
     Ok(())
 }
 ```
 
-## Low-Level Typed API
+### Explicit client and session
 
-### `Client` and `Session`
 ```rust
 use codex_runtime::runtime::{Client, SessionConfig};
 
@@ -117,7 +112,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### `automation::spawn`
+### Scoped streaming
+
+```rust
+use codex_runtime::runtime::{Client, PromptRunStreamEvent, SessionConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::connect_default().await?;
+    let session = client
+        .start_session(SessionConfig::new("/abs/path/workdir"))
+        .await?;
+
+    let mut stream = session.ask_stream("Explain the current module boundaries").await?;
+
+    while let Some(event) = stream.recv().await? {
+        if let PromptRunStreamEvent::AssistantMessageDelta(delta) = event {
+            print!("{delta}");
+        }
+    }
+
+    let final_result = stream.finish().await?;
+    println!("\nturn={} text={}", final_result.turn_id, final_result.assistant_text);
+
+    session.close().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+```
+
+`Session::ask_wait(prompt)` is the convenience path for `ask_stream(...).finish().await` when you do not need manual event handling.
+
+### Automation
+
 ```rust
 use std::time::{Duration, SystemTime};
 
@@ -149,170 +176,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Contract:
-- automation reuses one prepared `Session`; it does not create or resume sessions for you
-- scheduling uses absolute `SystemTime` bounds plus one fixed `Duration`
-- `every` must be greater than zero
-- only one turn is in flight at a time
+Automation contract:
+- one prepared `Session` per runner
+- fixed `Duration` cadence only
+- one turn in flight at a time
 - missed ticks collapse into one next eligible run
-- any `PromptRunError` stops the runner and records `last_error`
-- V1 does not provide cron parsing or restart persistence
-
-### `AppServer`
-```rust
-use codex_runtime::runtime::CommandExecParams;
-use codex_runtime::AppServer;
-use serde_json::json;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let app = AppServer::connect_default().await?;
-
-    let _thread = app
-        .request_json(
-            codex_runtime::rpc_methods::THREAD_START,
-            json!({
-                "cwd": "/abs/path/workdir",
-                "sandboxPolicy": { "type": "readOnly" }
-            }),
-        )
-        .await?;
-
-    let exec = app
-        .command_exec(CommandExecParams {
-            command: vec!["pwd".into()],
-            cwd: Some("/abs/path/workdir".into()),
-            ..CommandExecParams::default()
-        })
-        .await?;
-
-    println!("{}", exec.stdout);
-    app.shutdown().await?;
-    Ok(())
-}
-```
-
-## Defaults And Contracts
-
-- High-level builders stay minimal and do not mirror every upstream field.
-- When you need more control, use `RunProfile`, `SessionConfig`, `ClientConfig`, or `RuntimeConfig`.
-- Use `AppServer` typed helpers for stable low-level parity.
-- Use raw JSON-RPC for experimental or custom methods.
-- Per-client app-server launch control stays on `ClientConfig` (`process_env`, `process_cwd`, extra `app_server_args`) without turning `Client` into an arbitrary child-process wrapper.
+- any `PromptRunError` is terminal
+- no cron parsing, persistence, or restart recovery in v1
 
 ## Public Modules
 
 | Module | Role |
 |--------|------|
-| `codex_runtime` | Root convenience + core exports: `quick_run`, `Workflow`, `WorkflowConfig`, `AppServer`, `rpc_methods`, `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, `ShellCommandHook` |
-| `codex_runtime::automation` | Convenience session-scoped recurring prompt runner above one prepared `Session` |
-| `codex_runtime::runtime` | Foundation core runtime: `Client`, `Session`, `Runtime`, typed models, approvals, transport, errors |
-| `codex_runtime::plugin` | Foundation core hook extension point: `PreHook`, `PostHook`, `HookContext`, `HookPatch` |
-| `codex_runtime::web` | Built-in higher-order web bridge over runtime sessions, approvals, and SSE/REST delivery |
-| `codex_runtime::artifact` | Built-in higher-order artifact domain over runtime threads and artifact stores |
+| `codex_runtime` | root convenience surface |
+| `codex_runtime::runtime` | typed runtime, sessions, approvals, transport, hooks, metrics |
+| `codex_runtime::automation` | session-scoped recurring prompt runner |
+| `codex_runtime::plugin` | hook traits and hook-side contracts |
+| `codex_runtime::web` | higher-order web bridge over runtime sessions and approvals |
+| `codex_runtime::artifact` | higher-order artifact domain over runtime threads and stores |
 
-Important runtime submodules available for direct use when re-exports are not enough:
-`runtime::api`, `runtime::approvals`, `runtime::client`, `runtime::core`,
-`runtime::errors`, `runtime::events`, `runtime::hooks`, `runtime::metrics`,
-`runtime::rpc`, `runtime::rpc_contract`, `runtime::sink`, `runtime::state`,
-`runtime::transport`, `runtime::turn_output`
+Root crate exports include:
+- `quick_run`, `quick_run_with_profile`, `QuickRunError`
+- `Workflow`, `WorkflowConfig`
+- `AppServer`, `rpc_methods`
+- `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, `ShellCommandHook`
+- `automation`, `plugin`, `runtime`, `web`, `artifact`
 
-### Scoped session streaming
+## Runtime Contracts
 
-`Session::ask_stream(prompt)` starts one turn on an already loaded session and returns a scoped handle with `thread_id()`, `turn_id()`, `recv().await`, and `finish().await`.
-
-Use it when you need typed turn-scoped streaming on the canonical `runtime::{Client, Session}` bridge without reimplementing global `subscribe_live()` filtering. `finish()` is the normal completion path; dropping an unfinished stream triggers a best-effort interrupt.
-
-If you want the same scoped completion path without manually reading events, use `Session::ask_wait(prompt)`. It is a thin convenience over `ask_stream(...).finish().await`.
-
-Completion and hook observability today:
-- per-turn completion: `Session::ask_wait(...)` or `PromptRunStream::finish().await`
-- per-turn terminal events: `turn/completed`, `turn/failed`, `turn/interrupted`, `turn/cancelled`
-- raw runtime stream: `Runtime::subscribe_live()`
-- latest hook outcome snapshot: `Runtime::hook_report_snapshot()`
-
-There is no separate OS-level or push notification helper in the runtime. Completion is exposed through stream/event surfaces.
-
-## Built-in Higher-Order Modules
-
-### `codex_runtime::web`
-
-Primary entry points:
-- `WebAdapter::spawn(runtime, config)` or `spawn_with_adapter(...)`
-- `create_session(...)`, `create_turn(...)`, `close_session(...)`
-- `subscribe_session_events(...)`, `subscribe_session_approvals(...)`
-- `post_approval(...)`
-- `new_session_id()`, `serialize_sse_envelope(...)`
-
-Contract:
-- one `WebAdapter` bridges runtime threads into tenant/session-scoped web sessions
-- approval replies flow back through `post_approval(...)`; callers do not mutate runtime approval state directly
-
-### `codex_runtime::artifact`
-
-Primary entry points:
-- `ArtifactSessionManager::new(runtime, store)` or `new_with_adapter(...)`
-- `open(artifact_id)` — load or create one artifact-backed runtime thread
-- `run_task(spec)` — execute one typed artifact task
-- `FsArtifactStore::new(root)` — filesystem-backed store
-- pure helpers: `compute_revision(...)`, `validate_doc_patch(...)`, `apply_doc_patch(...)`
-
-Contract:
-- the module keeps artifact state in an `ArtifactStore` and delegates runtime turns through an adapter
-- compatibility is gated by `PluginContractVersion` before artifact tasks run
+- High-level builders stay intentionally smaller than raw upstream payloads.
+- Stable upstream fields graduate into typed APIs first.
+- Experimental or custom methods remain available through raw JSON-RPC.
+- Validation is strict in typed paths and only relaxed when callers explicitly choose raw mode.
+- Detached cleanup and validation paths are kept data-first where practical so side effects stay at the outer boundary.
 
 ## Hooks
 
-Hooks let you intercept and mutate prompt calls at defined lifecycle phases without forking the call path.
+Hooks let you intercept lifecycle phases without forking the runtime call path.
 
-```rust
-use std::sync::Arc;
-use codex_runtime::{WorkflowConfig, plugin::{PreHook, HookContext, HookAction, HookFuture, HookIssue}};
+Phases:
+- `PreRun`, `PostRun`
+- `PreSessionStart`, `PostSessionStart`
+- `PreTurn`, `PostTurn`
+- `PreToolUse`, `PostToolUse`
 
-struct LoggingHook;
-
-impl PreHook for LoggingHook {
-    fn name(&self) -> &'static str { "logging" }
-
-    fn call<'a>(&'a self, ctx: &'a HookContext) -> HookFuture<'a, Result<HookAction, HookIssue>> {
-        Box::pin(async move {
-            println!("phase={:?} cwd={:?}", ctx.phase, ctx.cwd);
-            Ok(HookAction::Noop)
-        })
-    }
-}
-
-let config = WorkflowConfig::new("/abs/path/workdir")
-    .with_global_pre_hook(Arc::new(LoggingHook));
-```
-
-Hook phases:
-- run/session/turn: `PreRun`, `PostRun`, `PreSessionStart`, `PostSessionStart`, `PreTurn`, `PostTurn`
-- tool loop: `PreToolUse`, `PostToolUse`
-
-Hook actions:
-- `HookAction::Noop`
-- `HookAction::Mutate(HookPatch)`
-- `HookAction::Block(BlockReason)` for pre-hooks
-
-Ergonomic builders:
-- global hooks: `with_global_pre_hook`, `with_global_post_hook`, `with_global_pre_tool_use_hook`
-- run-scoped hooks: `with_run_pre_hook`, `with_run_post_hook`
-- shell adapters: `with_shell_pre_hook`, `with_shell_post_hook`, `with_shell_pre_hook_timeout`
-
-Path note:
-- `HookMatcher`, `FilteredPreHook`, `FilteredPostHook`, and `ShellCommandHook` are also re-exported at the crate root as `codex_runtime::...`
-
-Important contract:
-- pre-tool-use hooks fire on approval-gated tool/file-change requests, not every successful write
-- privileged write sandboxes still require explicit opt-in via `allow_privileged_escalation()`
-- tool-use hooks do not replace sandbox/approval policy; they sit on top of it
+Key rules:
+- pre-hooks can mutate or block
+- post-hooks observe outcomes and issue reports
+- tool-use hooks run inside approval-gated command/file-change handling
+- hook logic sits on top of sandbox and approval policy, not instead of it
 
 ## Documentation
 
-- [API_REFERENCE.md](docs/API_REFERENCE.md): full public API surface, typed payload contracts, validation and security rules
-- [TEST_TREE.md](docs/TEST_TREE.md): test layer structure and live-gate boundary
-- [CHANGELOG.md](CHANGELOG.md): release history
+- [`docs/ONE_PAGER.md`](docs/ONE_PAGER.md): one-page project summary
+- [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md): public API and contract reference
+- [`docs/TEST_TREE.md`](docs/TEST_TREE.md): test layers and release-gate boundaries
+- [`docs/README.md`](docs/README.md): documentation index
+- [`CHANGELOG.md`](CHANGELOG.md): release history
 
 ## Quality Gates
 
@@ -323,18 +243,11 @@ cargo test --workspace
 ```
 
 Opt-in real-server tests:
+
 ```bash
 CODEX_RUNTIME_REAL_SERVER_APPROVED=1 \
 cargo test -p codex-runtime ergonomic::tests::real_server:: -- --ignored --nocapture
 ```
-
-## Design Boundaries
-
-- High-level APIs stay small on purpose.
-- Stable non-experimental upstream fields go to typed APIs first.
-- Experimental fields stay raw until the protocol is stable and testable.
-- `requestUserInput` and dynamic tool-call live coverage remain outside the deterministic release boundary.
-- Hook support exists, but live hook coverage is narrower than core prompt/session flows.
 
 ## License
 

@@ -5,7 +5,7 @@
 Repository identity:
 - repository and crate: `codex-runtime`
 - Rust import path: `codex_runtime`
-- current crate version: `0.6.1`
+- current crate version: `0.6.2`
 
 The project is intentionally layered so callers can start with one prompt and move down only when they need more control.
 
@@ -26,7 +26,7 @@ Published crate:
 
 ```toml
 [dependencies]
-codex-runtime = "0.6.1"
+codex-runtime = "0.6.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -228,7 +228,6 @@ Key rules:
 
 ## Documentation
 
-- [`docs/ONE_PAGER.md`](docs/ONE_PAGER.md): one-page project summary
 - [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md): public API and contract reference
 - [`docs/TEST_TREE.md`](docs/TEST_TREE.md): test layers and release-gate boundaries
 - [`docs/README.md`](docs/README.md): documentation index

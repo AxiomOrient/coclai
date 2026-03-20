@@ -1,6 +1,6 @@
 # API Reference
 
-This document fixes the current public surface of `codex-runtime` `0.6.1`.
+This document fixes the current public surface of `codex-runtime` `0.6.2`.
 
 It focuses on:
 - exported Rust entry points

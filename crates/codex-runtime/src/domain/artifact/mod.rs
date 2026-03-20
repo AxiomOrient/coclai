@@ -62,6 +62,9 @@ impl ArtifactSessionManager {
         }
     }
 
+    // ArtifactStore implementations may perform synchronous filesystem I/O.
+    // spawn_blocking moves that work off the async executor thread so it
+    // cannot block other tasks while the store operation runs.
     async fn store_io<T: Send + 'static>(
         &self,
         op: impl FnOnce(&dyn ArtifactStore) -> Result<T, StoreErr> + Send + 'static,

@@ -19,6 +19,8 @@ impl PluginContractVersion {
         Self { major, minor }
     }
 
+    /// Compatible when major versions match. Minor increments are additive
+    /// (new optional fields only) and do not break existing callers.
     pub const fn is_compatible_with(self, other: Self) -> bool {
         self.major == other.major
     }

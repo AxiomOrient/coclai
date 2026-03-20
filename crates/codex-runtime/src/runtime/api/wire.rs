@@ -152,15 +152,12 @@ pub(super) fn thread_start_params_to_wire(p: &ThreadStartParams) -> Value {
     let mut params = Map::<String, Value>::new();
     insert_thread_common_overrides(&mut params, p);
 
-    if let Some(service_name) = p.service_name.as_ref() {
-        params.insert(
-            "serviceName".to_owned(),
-            Value::String(service_name.clone()),
-        );
-    }
-    if let Some(ephemeral) = p.ephemeral {
-        params.insert("ephemeral".to_owned(), Value::Bool(ephemeral));
-    }
+    insert_if_some(
+        &mut params,
+        "serviceName",
+        p.service_name.as_deref().map(Value::from),
+    );
+    insert_if_some(&mut params, "ephemeral", p.ephemeral.map(Value::from));
 
     Value::Object(params)
 }
@@ -175,61 +172,54 @@ pub(super) fn thread_overrides_to_wire(p: &ThreadStartParams) -> Map<String, Val
 }
 
 fn insert_thread_common_overrides(params: &mut Map<String, Value>, p: &ThreadStartParams) {
-    if let Some(model) = p.model.as_ref() {
-        params.insert("model".to_owned(), Value::String(model.clone()));
-    }
-    if let Some(model_provider) = p.model_provider.as_ref() {
-        params.insert(
-            "modelProvider".to_owned(),
-            Value::String(model_provider.clone()),
-        );
-    }
-    if let Some(service_tier) = p.service_tier {
-        params.insert(
-            "serviceTier".to_owned(),
-            match service_tier {
-                Some(service_tier) => Value::String(service_tier.as_wire().to_owned()),
-                None => Value::Null,
-            },
-        );
-    }
-    if let Some(cwd) = p.cwd.as_ref() {
-        params.insert("cwd".to_owned(), Value::String(cwd.clone()));
-    }
-    if let Some(approval_policy) = p.approval_policy.as_ref() {
-        params.insert(
-            "approvalPolicy".to_owned(),
-            Value::String(approval_policy.as_wire().to_owned()),
-        );
-    }
+    insert_if_some(params, "model", p.model.as_deref().map(Value::from));
+    insert_if_some(
+        params,
+        "modelProvider",
+        p.model_provider.as_deref().map(Value::from),
+    );
+    insert_if_some(
+        params,
+        "serviceTier",
+        p.service_tier.map(|st| {
+            st.map_or(Value::Null, |s| Value::String(s.as_wire().to_owned()))
+        }),
+    );
+    insert_if_some(params, "cwd", p.cwd.as_deref().map(Value::from));
+    insert_if_some(
+        params,
+        "approvalPolicy",
+        p.approval_policy
+            .as_ref()
+            .map(|ap| Value::from(ap.as_wire())),
+    );
     insert_privileged_escalation_approved(params, p.privileged_escalation_approved);
-    if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
-        params.insert(
-            "sandboxPolicy".to_owned(),
-            sandbox_policy_to_wire_value(sandbox_policy),
-        );
-    }
-    if let Some(config) = p.config.as_ref() {
-        params.insert("config".to_owned(), Value::Object(config.clone()));
-    }
-    if let Some(base_instructions) = p.base_instructions.as_ref() {
-        params.insert(
-            "baseInstructions".to_owned(),
-            Value::String(base_instructions.clone()),
-        );
-    }
-    if let Some(developer_instructions) = p.developer_instructions.as_ref() {
-        params.insert(
-            "developerInstructions".to_owned(),
-            Value::String(developer_instructions.clone()),
-        );
-    }
-    if let Some(personality) = p.personality {
-        params.insert(
-            "personality".to_owned(),
-            Value::String(personality.as_wire().to_owned()),
-        );
-    }
+    insert_if_some(
+        params,
+        "sandboxPolicy",
+        p.sandbox_policy.as_ref().map(sandbox_policy_to_wire_value),
+    );
+    insert_if_some(
+        params,
+        "config",
+        p.config.as_ref().map(|c| Value::Object(c.clone())),
+    );
+    insert_if_some(
+        params,
+        "baseInstructions",
+        p.base_instructions.as_deref().map(Value::from),
+    );
+    insert_if_some(
+        params,
+        "developerInstructions",
+        p.developer_instructions.as_deref().map(Value::from),
+    );
+    insert_if_some(
+        params,
+        "personality",
+        p.personality
+            .map(|per| Value::String(per.as_wire().to_owned())),
+    );
 }
 
 /// Map turn start parameters to wire JSON.
@@ -253,42 +243,32 @@ pub(super) fn turn_start_params_to_wire(thread_id: &str, p: &TurnStartParams) ->
         );
     }
     insert_privileged_escalation_approved(&mut params, p.privileged_escalation_approved);
-    if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
-        params.insert(
-            "sandboxPolicy".to_owned(),
-            sandbox_policy_to_wire_value(sandbox_policy),
-        );
-    }
-    if let Some(model) = p.model.as_ref() {
-        params.insert("model".to_owned(), Value::String(model.clone()));
-    }
-    if let Some(service_tier) = p.service_tier {
-        params.insert(
-            "serviceTier".to_owned(),
-            match service_tier {
-                Some(service_tier) => Value::String(service_tier.as_wire().to_owned()),
-                None => Value::Null,
-            },
-        );
-    }
-    if let Some(effort) = p.effort.as_ref() {
-        params.insert(
-            "effort".to_owned(),
-            Value::String(effort.as_wire().to_owned()),
-        );
-    }
-    if let Some(summary) = p.summary.as_ref() {
-        params.insert("summary".to_owned(), Value::String(summary.clone()));
-    }
-    if let Some(personality) = p.personality {
-        params.insert(
-            "personality".to_owned(),
-            Value::String(personality.as_wire().to_owned()),
-        );
-    }
-    if let Some(output_schema) = p.output_schema.as_ref() {
-        params.insert("outputSchema".to_owned(), output_schema.clone());
-    }
+    insert_if_some(
+        &mut params,
+        "sandboxPolicy",
+        p.sandbox_policy.as_ref().map(sandbox_policy_to_wire_value),
+    );
+    insert_if_some(&mut params, "model", p.model.as_deref().map(Value::from));
+    insert_if_some(
+        &mut params,
+        "serviceTier",
+        p.service_tier.map(|st| {
+            st.map_or(Value::Null, |s| Value::String(s.as_wire().to_owned()))
+        }),
+    );
+    insert_if_some(
+        &mut params,
+        "effort",
+        p.effort.as_ref().map(|e| Value::from(e.as_wire())),
+    );
+    insert_if_some(&mut params, "summary", p.summary.as_deref().map(Value::from));
+    insert_if_some(
+        &mut params,
+        "personality",
+        p.personality
+            .map(|per| Value::String(per.as_wire().to_owned())),
+    );
+    insert_if_some(&mut params, "outputSchema", p.output_schema.clone());
 
     Value::Object(params)
 }
@@ -308,9 +288,11 @@ pub(super) fn command_exec_params_to_wire(p: &CommandExecParams) -> Value {
         ),
     );
 
-    if let Some(process_id) = p.process_id.as_ref() {
-        params.insert("processId".to_owned(), Value::String(process_id.clone()));
-    }
+    insert_if_some(
+        &mut params,
+        "processId",
+        p.process_id.as_deref().map(Value::from),
+    );
     if p.tty {
         params.insert("tty".to_owned(), Value::Bool(true));
         params.insert("streamStdin".to_owned(), Value::Bool(true));
@@ -341,9 +323,7 @@ pub(super) fn command_exec_params_to_wire(p: &CommandExecParams) -> Value {
             Value::Number(serde_json::Number::from(timeout_ms)),
         );
     }
-    if let Some(cwd) = p.cwd.as_ref() {
-        params.insert("cwd".to_owned(), Value::String(cwd.clone()));
-    }
+    insert_if_some(&mut params, "cwd", p.cwd.as_deref().map(Value::from));
     if let Some(env) = p.env.as_ref() {
         let env_obj = env
             .iter()
@@ -371,12 +351,11 @@ pub(super) fn command_exec_params_to_wire(p: &CommandExecParams) -> Value {
         );
         params.insert("size".to_owned(), Value::Object(size_obj));
     }
-    if let Some(sandbox_policy) = p.sandbox_policy.as_ref() {
-        params.insert(
-            "sandboxPolicy".to_owned(),
-            sandbox_policy_to_wire_value(sandbox_policy),
-        );
-    }
+    insert_if_some(
+        &mut params,
+        "sandboxPolicy",
+        p.sandbox_policy.as_ref().map(sandbox_policy_to_wire_value),
+    );
 
     Value::Object(params)
 }
@@ -507,6 +486,12 @@ fn text_element_to_wire(element: &TextElement) -> Value {
 fn insert_privileged_escalation_approved(params: &mut Map<String, Value>, approved: bool) {
     if approved {
         params.insert("privilegedEscalationApproved".to_owned(), Value::Bool(true));
+    }
+}
+
+fn insert_if_some(params: &mut Map<String, Value>, key: &'static str, value: Option<Value>) {
+    if let Some(v) = value {
+        params.insert(key.to_owned(), v);
     }
 }
 
